@@ -26,8 +26,9 @@
 
 ## TTL 与容量
 
-· 默认 **6 小时**（`NEG_CACHE_TTL`）：审核策略不会几分钟一变，
-  但也不能长到"用户改了策略也照样拒"。
+· 默认 **24 小时**（`NEG_CACHE_TTL`，2026-10-03 用户口径从6h 调长）：
+  审核策略很少变，而重复提交同一违规素材的**代价是每次都计费**
+  ⇒ 宁可拦久一点也别让调用方反复踩。设 0 即**关闭**。
 · 有界 LRU（默认 2048 条，`NEG_CACHE_MAX`）——
   无界的缓存是内存泄漏。
 · 🔴 **进程内、不跨实例**：多副本部署时各持一份。
@@ -85,7 +86,7 @@ def cache_key(*, cap_id: str, upstream_model: str | None = None,
 class NegativeCache:
     """线程安全的 TTL + LRU 负缓存。"""
 
-    def __init__(self, *, ttl: float = 21600.0, max_entries: int = 2048) -> None:
+    def __init__(self, *, ttl: float = 86400.0, max_entries: int = 2048) -> None:
         self._ttl = float(ttl)
         self._max = max(0, int(max_entries))
         self._lock = threading.Lock()

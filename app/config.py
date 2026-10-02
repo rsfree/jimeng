@@ -129,9 +129,10 @@ class Settings:
     #: 短期内**不再提交上游**。为什么：审核拒绝是**确定性**的，原样重试
     #: 必然再被拒，**而且每次都计费**（实测失败 message 里就写着
     #: "该任务已被上游计费"）⇒ 不缓存= 调用方反复重试、反复扣钱。
-    #: TTL 默认 6 小时：审核策略不会几分钟一变，但也不能长到
-    #: "策略改了也照样拒"。设为 0 即**关闭**负缓存。
-    neg_cache_ttl: float = 21600.0
+    #: TTL 默认 **24 小时**（2026-10-03 用户口径从 6h 调长）：审核策略很少变，
+    #: 而重复提交同一违规素材的代价是**每次都计费**
+    #: ⇒ 宁可拦久一点。设为 0 即**关闭**负缓存。
+    neg_cache_ttl: float = 86400.0
     #: 有界 LRU 条数（无界缓存 = 内存泄漏）。
     neg_cache_max: int = 2048
 
@@ -225,7 +226,7 @@ class Settings:
             coordinator_tick=_f("COORDINATOR_TICK", 1.0),
             coordinator_lease=_f("COORDINATOR_LEASE", 30.0),
             sync_max_wait=_f("SYNC_MAX_WAIT", 300.0),
-            neg_cache_ttl=_f("NEG_CACHE_TTL", 21600.0),
+            neg_cache_ttl=_f("NEG_CACHE_TTL", 86400.0),
             neg_cache_max=int(_f("NEG_CACHE_MAX", 2048)),
             task_db=_s("TASK_DB",
                        "postgresql+psycopg2://jimeng:jimeng@127.0.0.1:5432/jimeng"),

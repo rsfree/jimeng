@@ -1253,7 +1253,7 @@ class Service:
             err = self._terminal_error(st)
             # 🔴 审核类失败 ⇒ **记入负缓存**（只有内容审核才记：
             # 上游故障/限流是**可重试**的，缓存它们会把"临时故障"
-            # 变成 6 小时的假禁固，那是比不缓存坏得多的错）。
+            # 变成 24 小时的假禁固，那是比不缓存坏得多的错）。
             if isinstance(err, ContentPolicyError):
                 self.neg.record_failure(
                     cap_id=rec.cap_key or rec.model,

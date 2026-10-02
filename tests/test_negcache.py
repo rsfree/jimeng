@@ -192,7 +192,7 @@ def test_prompt_is_not_stored_in_the_cache():
 def test_only_content_policy_is_recorded():
     """🔴 **只有**内容审核才进负缓存。
 
-    上游故障/限流是**可重试**的；把它们缓存 6 小时 = 制造假禁固，
+    上游故障/限流是**可重试**的；把它们缓存 24 小时 = 制造假禁固，
     那比不缓存坏得多。
     """
     src = inspect.getsource(Service)
@@ -247,3 +247,31 @@ def test_audit_rejection_needs_decision_two_not_just_truthy_result():
 
     src = inspect.getsource(Service)
     assert 'r.get("audit_decision") == 2' in src, "必须精确判 == 2"
+
+
+def test_default_ttl_is_24h_and_stays_configurable():
+    """🔴 默认 TTL = **24 小时**（2026-10-03 用户口径，从 6h 调长）。
+
+    调长的理由：审核策略很少变，而**重复提交同一违规素材每次都计费**
+    ⇒ 宁可拦久一点，别让调用方反复踩。
+
+    这条门禁钉住"默认值"本身 —— 它是**运维口径**（可通过
+    `NEG_CACHE_TTL` 覆盖），但默认值不能被"顺手改小"而无痕。
+    """
+    import os
+    from app.negcache import NegativeCache
+    from app.config import Settings
+
+    # 86400 = 24h（构造器默认值）
+    assert NegativeCache()._ttl == 86400.0
+    # ⚠️ 必须用 `from_env()`：dataclass 的字段默认值在**类定义时**求值，
+    # `Settings()` 读的是那个已固化的值、**不会重读环境变量**
+    #（踩过一次：改 os.environ 后断言 Settings() 仍是 86400）。
+    assert Settings.from_env().neg_cache_ttl == 86400.0
+    # 仍可被环境变量覆盖（口径可调，不必改代码）
+    os.environ["NEG_CACHE_TTL"] = "0"
+    try:
+        assert Settings.from_env().neg_cache_ttl == 0.0, \
+            "NEG_CACHE_TTL 必须能覆盖默认值"
+    finally:
+        del os.environ["NEG_CACHE_TTL"]
