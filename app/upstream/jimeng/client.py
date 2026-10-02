@@ -70,6 +70,18 @@ PATH_COMMON_CONFIG = "/mweb/v1/get_common_config"
 #: **之前**单独调一次，只判"这张垫图能不能用"。
 PATH_AUDIT = "/mweb/v1/execute_generate_audit"
 
+#: 🔴 2026-10-02 实测：**`scene` 直接决定判定严格度，锁死 1**。
+#: 同一张违规图： `scene=1` ⇒ `audit_decision=2`（拒绝）；
+#: `scene=2` ⇒ `audit_decision=1`（**通过**）。抓包里见过 `scene:2`，
+#: 但实测它对图片**放行违规素材** ⇒ **不能改**。
+#: ⚠️ 这条是"静默放行"的典型：改成 2 不会报错、不影响正常图，
+#: 只是**违规素材也过了** ⇒ 预审形同虚设，而线上不会有任何告警。
+#: 门禁 `test_negcache.py::test_audit_scene_is_pinned_to_the_strict_one`。
+AUDIT_SCENE = 1
+#: 🔴 `material_type` 实测**只有 1（图）合法**：传 2 上游直接
+#: `ret=1000 invalid parameter`。视频/音频的取值未测（别猜）。
+AUDIT_MATERIAL_TYPE_IMAGE = 1
+
 #: 默认模型：抓包里用的就是它（站点自报 Seedream 5.0 Lite）。
 DEFAULT_MODEL = "high_aes_general_v50"
 #: 抓包实测唯一跑通的尺寸（2048×2048，`resolution_type=2k`）。
@@ -2056,7 +2068,7 @@ class JimengClient:
     # ------------------------------------------------------------ 素材预审
 
     def audit_materials(self, uris: Sequence[str], *, model: str = DEFAULT_MODEL,
-                        scene: int = 1, material_type: int = 1) -> list[dict]:
+                        scene: int = AUDIT_SCENE, material_type: int = 1) -> list[dict]:
         """提交前**预审输入素材**（图/视频/音频）—— **零成本**，不生成。
 
         🔴 为什么必须做这一步（2026-10-02 用户抓包 + 实测）：

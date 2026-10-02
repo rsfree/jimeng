@@ -207,3 +207,43 @@ def test_lookup_happens_before_the_task_row_is_created():
     i_query = src.index("raise_if_blocked")
     i_row = src.index("rec = TaskRecord(")
     assert i_query < i_row, "负缓存查询必须早于建任务行"
+
+
+# ---------------------------------------------------------------------------
+# ④ 预审参数：锁死"严格"那一个（静默放行的典型）
+# ---------------------------------------------------------------------------
+
+def test_audit_scene_is_pinned_to_the_strict_one():
+    """🔴 `scene` 必须是 **1**，不能改成 2。
+
+    实测（2026-10-02，两账号一致）：同一张违规图
+    · `scene=1` ⇒ `audit_decision=2`（**拒绝**）
+    · `scene=2` ⇒ `audit_decision=1`（**通过**）
+
+    ⚠️ 改成 2 **不会报错、不影响正常图**，只是**违规素材也过了** ——
+    预审形同虚设，而线上不会有任何告警。这是最典型的"静默放行"。
+    抓包里出现过 `scene:2`，所以这个坑很可能被再次踩到。
+    """
+    from app.upstream.jimeng.client import AUDIT_SCENE, JimengClient
+
+    assert AUDIT_SCENE == 1, (
+        "scene 只能是 1：实测 scene=2 会让违规素材通过（静默放行）")
+    # 默认参数必须就是那个严格值
+    import inspect
+    sig = inspect.signature(JimengClient.audit_materials)
+    assert sig.parameters["scene"].default == AUDIT_SCENE
+    assert sig.parameters["material_type"].default == 1, (
+        "material_type 只有 1（图）合法，传 2 上游回 ret=1000")
+
+
+def test_audit_rejection_needs_decision_two_not_just_truthy_result():
+    """🔴 判据是 **`audit_decision == 2`**，不是"result 非空/为真"。
+
+    `result_list` 在**通过**时也有内容（`[{"audit_decision": 1}]`）——
+    写 `if results:` 会把**通过**误判成**拒绝**（或反之），
+    那是"审计结论反了"这种最难发现的错。
+    """
+    from app.service import Service
+
+    src = inspect.getsource(Service)
+    assert 'r.get("audit_decision") == 2' in src, "必须精确判 == 2"
