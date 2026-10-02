@@ -308,7 +308,11 @@ CAPABILITIES: tuple[Capability, ...] = (
               "`high_aes_general_v50`（5.0 Lite，0，默认，"
               "**方舟对应名 `doubao-seedream-5-0-flash-260915` 可原样传**），"
               "`high_aes_general_v50p_large`（5.0 Pro，8/张）、"
-              "4.7 / 4.6 / 4.5 / 4.1 / 4.0（未测）。",
+              "4.7 / 4.6 / 4.5 / 4.1 / 4.0（未测）、"
+              "`jm_image_model_yc_mj82`（**图片美学模型 V8.2**，5/张）。"
+              "⚠️ **mj82 的张数不可控**（服务端只声明 [4]）⇒ 恒出 4 张、"
+              "按 4 张计费，请求 n 会被吸附并在 degradations 里留痕；"
+              "带输入图时同一个 model名会走 i2i（blend），**t2i/i2i 都已真跑验证**。",
     ),
     Capability(
         key="jimeng:i2i", name="i2i", title="图生图（blend）",

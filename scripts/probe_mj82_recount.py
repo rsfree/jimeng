@@ -53,7 +53,7 @@ def submit_one(c: JimengClient, n: int, run: int) -> dict:
 
 def crosscheck(c: JimengClient, results: list[dict]) -> list[dict]:
     """用四个独立字段数张数 + 回读回执的 gen_count。"""
-    raw = c._post(PATH_HISTORY,
+    raw = c._post(PATH_HISTORY,  # noqa: SLF001  （探针直读私有的 _post：与 credit_probe/e2e_video 同惯例）
                   {"submit_ids": [r["submit_id"] for r in results]})
     data = raw.get("data") or {}
     out = []

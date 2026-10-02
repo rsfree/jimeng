@@ -680,14 +680,33 @@ python scripts/dump_video_models.py --all --raw /tmp/cfg.json
 `resolution_map`：1k（1024²/768×1024/1024×576…）与 2k（2048²/1728×2304…），
 `default_resolution_type="1k"`。
 
-### 17.5 支持图生图（byte_edit）
+### 17.5 ✅ 支持图生图（byte_edit）—— **已端到端真跑**
 `feats` 含 `t2i` + `byte_edit` + `simple_image` + `per_piece` + `refuse_image`；
 `input_image_limit=[{"max_image_num":20,"ability_name":"byte_edit"}]`。
-⇒ 2026-10-02 已打通i2i：**原先 `resolve` 只在 t2i 族返回上游模型**，
-带图 + `model=mj82` 会撞"t2i 不接受输入图"的 400 ——
-`blend()` 明明有 `model` 参数却没传。现已连能力带模型一起换。
-⚠️ 是否支持 blend **只认服务端 `feats`**（`upstream_supports_blend`），
-读不到 ⇒ 保守拒绝（"读得到≠用得了"的反向纪律）。
+
+**✅ 2026-10-02 真跑通过**（`submit_id=64a86c5c-c8b4-4ec0-b701-f30cec805aa4`）：
+走**生产同一条路**（下载垫图 → ImageX 上传成 `image_uri` →
+`blend(image_uris=[uri], model=mj82)`）——
+· 提交包 `model` 回读 = `jm_image_model_yc_mj82`（**不是**默认 Lite）
+  ⇒ 上游真的按 mj82 跑了 byte_edit，不只是我们把参数传下去；
+· `gen_option.gen_count` = 4（`n=1` 被吸附成 4，告警如实）；
+· 终态 `status=50`，用时 200s，出图 **4 张**（2048²png），**四字段一致**；
+· 消耗记录 `amount=28`（4 张 2k = 7/张），`submit_id` 精确对上，余额 5594→5566。
+
+⚠️ **别把"接线通"当"能用"**：2026-10-02 首版探针的 i2i 用例**被跳过**了
+（依赖的产物没取到），当时只有"代码路径通"的证据。
+`blend()` 有 `model` 参数 ≠ 上游认这个模型 —— 只有真跑能回答。
+已补门禁 `test_mj82_blend_was_proven_end_to_end_not_just_wired`。
+
+⚠️ 调用坑：`blend(source_from默认 "upload")` **必须给 `image_uri(s)`**，
+直接传 `image_url` 会报 `必须给 image_uri`（`source_from="link"` 是**另一条**
+路径，不走它以免测的不是生产链路）。
+
+⚠️ 2026-10-02 同时修的接线缺口：**原先 `_submit` 的 i2i 分支不传模型**、
+`resolve` 也只在 t2i 族返回上游模型 ⇒ 带图 + `model=mj82` 会撞
+"t2i 不接受输入图"的 400。现已连能力带模型一起换。
+是否支持 blend **只认服务端 `feats`**（`upstream_supports_blend`），
+读不到 ⇒ 保守拒绝（"读得到 ≠ 用得了"的反向纪律）。
 
 ### 17.6 别名键必须与归一化输出**逐字一致**（踩坑记录）
 `_norm_model_name` 会小写并把 `.`/空格换成 `-`：

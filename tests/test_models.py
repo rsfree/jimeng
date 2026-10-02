@@ -381,6 +381,37 @@ def test_i2i_accepts_upstream_model_and_t2i_does_not_swallow_it():
     assert (cap2.api_id, model2) == ("jimeng-t2i", MJ)
 
 
+def test_mj82_blend_was_proven_end_to_end_not_just_wired():
+    """🔴 mj82 走 blend（图生图）**已端到端真跑** —— 不只是"代码路径通"。
+
+    这条门禁钉住一个容易被糊弄过去的区分：
+      · `test_i2i_accepts_upstream_model_and_t2i_does_not_swallow_it` 只能证明
+        **我们**会把模型名传下去；
+      · 但"上游认不认这个模型走 byte_edit" **只有真跑能回答**。
+    2026-10-02 首版探针的 i2i 用例**被跳过了**（依赖的产物没取到），
+    等于"接线修好了但没验证过" —— 那种状态最容易自我欺骗。
+
+    ✅ 2026-10-02 补测通过（submit_id `64a86c5c…`）：
+      · 走生产同一条路（下载垫图 → ImageX 上传 → `blend(image_uris=…)`）；
+      · 提交包 `model` 回读 = `jm_image_model_yc_mj82`（**不是**默认 Lite）；
+      · 终态 status=50，出图 4 张，四字段一致；
+      · 消耗记录 `amount=28`（4 张 2k = 7/张），submit_id 对得上。
+    判据取自docs/UPSTREAM.md §17.5 的实测记录。
+    """
+    from app.models import UPSTREAM_MODEL_CREDITS
+
+    # mj82 的图生图与文生图**同一计费档**（都是 4 张 2k = 28）
+    # ⇒ 登记的单价（1k 四张 = 5/张）不能被当成 i2i 的口径
+    assert UPSTREAM_MODEL_CREDITS[MJ] == 5, \
+        "登记的是 1k 四张口径（5/张）；2k 档是 7/张，口径不同别混用"
+    # 真跑结论必须留在文档里（代码之外的唯一证据载体）
+    from pathlib import Path
+    doc = Path(__file__).resolve().parent.parent / "docs" / "UPSTREAM.md"
+    text = doc.read_text(encoding="utf-8")
+    assert "64a86c5c" in text, \
+        "i2i 真跑的 submit_id 证据丢失了 —— §17.5 必须留着可追溯的凭据"
+
+
 def test_blend_capability_is_read_from_server_not_hardcoded():
     """`upstream_supports_blend` 只认**服务端能力表**，读不到 ⇒ False。
 
