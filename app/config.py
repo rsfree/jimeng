@@ -124,6 +124,17 @@ class Settings:
     #: 否则跑满预算的请求会被掐断，客户端拿到的是断连而不是我们构造的降级响应。
     sync_max_wait: float = 300.0
 
+    # -------------------------------------------------- 内容审核负缓存
+    #: 🔴 2026-10-02：被上游审核拒绝过的 (能力, 模型, prompt, 输入图, 档位)
+    #: 短期内**不再提交上游**。为什么：审核拒绝是**确定性**的，原样重试
+    #: 必然再被拒，**而且每次都计费**（实测失败 message 里就写着
+    #: "该任务已被上游计费"）⇒ 不缓存= 调用方反复重试、反复扣钱。
+    #: TTL 默认 6 小时：审核策略不会几分钟一变，但也不能长到
+    #: "策略改了也照样拒"。设为 0 即**关闭**负缓存。
+    neg_cache_ttl: float = 21600.0
+    #: 有界 LRU 条数（无界缓存 = 内存泄漏）。
+    neg_cache_max: int = 2048
+
     # ------------------------------------------------------------ 持久化
     #: 任务库 DSN。生产用 PostgreSQL；`:memory:` 或文件路径（SQLite）留给测试与联调。
     task_db: str = "postgresql+psycopg://jimeng:jimeng@127.0.0.1:5432/jimeng"
@@ -214,6 +225,8 @@ class Settings:
             coordinator_tick=_f("COORDINATOR_TICK", 1.0),
             coordinator_lease=_f("COORDINATOR_LEASE", 30.0),
             sync_max_wait=_f("SYNC_MAX_WAIT", 300.0),
+            neg_cache_ttl=_f("NEG_CACHE_TTL", 21600.0),
+            neg_cache_max=int(_f("NEG_CACHE_MAX", 2048)),
             task_db=_s("TASK_DB",
                        "postgresql+psycopg2://jimeng:jimeng@127.0.0.1:5432/jimeng"),
             task_retention_days=_i("TASK_RETENTION_DAYS", 7),

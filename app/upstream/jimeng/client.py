@@ -66,6 +66,9 @@ PATH_UPLOAD_TOKEN = "/mweb/v1/get_upload_token"
 #: 服务端下发的**模型能力表**（张数选项 / 各比例精确像素 / 支持的能力）。
 #: 只读、零成本 —— 见 `capabilities.py` 与 `docs/UPSTREAM.md` §11。
 PATH_COMMON_CONFIG = "/mweb/v1/get_common_config"
+#: 🔴 2026-10-02（用户抓包）：**输入素材预审**。在 `aigc_draft/generate`
+#: **之前**单独调一次，只判"这张垫图能不能用"。
+PATH_AUDIT = "/mweb/v1/execute_generate_audit"
 
 #: 默认模型：抓包里用的就是它（站点自报 Seedream 5.0 Lite）。
 DEFAULT_MODEL = "high_aes_general_v50"
@@ -160,6 +163,33 @@ CODES_CONTENT = frozenset({1063, 1159, 2003, 2004, 2005,          # 内容审核
 #: 只看 status 会把它归成"上游故障"，调用方会去重试一个必然再被拒的请求。
 CODES_SECURITY = frozenset({1063, 1159, 2003, 2004, 2005, 2038, 2039, 2041,
                             2042, 2043, 2048, 2050})
+
+#: 🔴 2026-10-02（实测补，见 `TaskState.fail_key`）：**字符串**形态的审核键。
+#: 线上任务库里 5 条失败任务的 `fail_code` **全为空**，真因只在这上面 ——
+#: 只查 `CODES_SECURITY` 会把它们**全漏判**成"上游故障·可重试"
+#: （而它们必然再被拒，且**每次都计费**）。
+#: ⚠️ 判据用**子串匹配**（`in`）而不是等值：上游可能给同族变体
+#: （如 `..._toast` / `..._block` 带后缀），等值匹配会漏。
+#: ⚠️ 后两组是**泛化兜底**，**未拿到实测样本**（线上只出现过前两组）——
+#: 写在这里是为了"输入图被拒"那类键名不同也能覆盖，但**属推测**。
+#: 真出现新键名时应补实测样本并把这条注释挪到上面那组。
+KEYS_SECURITY_SUBSTR: tuple[str, ...] = (
+    # —— 以下两组 2026-10-02 有线上实测样本 ——
+    "copyright_block",                # 生成的图片未通过审核（**输出图**被拒）
+    "text_violates_community",        # 输入文字不符合平台规则（**输入词**被拒）
+    # —— 以下为泛化兜底，**未实测**（推测覆盖"输入图被拒"等变体）——
+    "violates_community",
+    "image_violates", "image_risk", "picture_violates",
+    "risk_control", "audit_reject", "content_risk", "illegal",
+    # ⚠️ 刻意**不加**裸 "block"：太宽，会把 `copyright_block` 之外的
+    # 非审核类 block（限流/风控/未知）也吞进"内容审核"⇒ 分类错误同样有害。
+)
+
+
+def is_security_key(fail_key: str | None) -> bool:
+    """失败键（字符串）是否属于**内容审核/版权**类。"""
+    k = (fail_key or "").lower()
+    return any(s in k for s in KEYS_SECURITY_SUBSTR)
 CODES_PARAM = frozenset({1001, 1002, 1161, 1162, 1190, 1189, 3021, 4003,
                          4010, 2203, 2204})
 
@@ -526,6 +556,14 @@ class TaskState:
     #: 实测 `status=30`（通用"生成失败"）配上 `fail_code=2038`（InputTextRisk）
     #: 才是真因；只看 status 会把它误归成"上游故障"。
     fail_code: int | None = None
+    #: 🔴 2026-10-02：上游 `fail_starling_key`（**字符串**的失败分类键）。
+    #: 🔴 **它才是这类失败的权威判据** —— 实测（线上任务库 5 条失败）：
+    #: `status=30generate_failed` + `fail_starling_key` 取值：
+    #: · `web_fail2generate_copyright_block` → "生成的图片未通过审核"（**输出图**被拒）
+    #: · `web_text_violates_community_guidelines_toast` → "你输入的文字不符合平台规则"（**输入词**被拒）
+    #: 而 `fail_code` 在这两例里都是**空的** ⇒ 只看 `fail_code` 会**全漏判**成
+    #: "上游故障"⇒ 调用方以为"可重试"，而它必然再被拒（**且每次都计费**）。
+    fail_key: str = ""
     images: list[GeneratedImage] = field(default_factory=list)
     total: int | None = None
     finished_count: int | None = None
@@ -568,6 +606,7 @@ def parse_task(submit_id: str, node: dict) -> TaskState:
     if st.failed:
         key = node.get("fail_starling_key") or ""
         msg = node.get("fail_starling_message") or ""
+        st.fail_key = str(key).strip()
         st.failed_reason = " ".join(x for x in (key, msg) if x) or st.status_name
         _fc = node.get("fail_code")
         st.fail_code = _fc if isinstance(_fc, int) else None
@@ -2013,6 +2052,34 @@ class JimengClient:
         """
         _ = model
         return self._post(PATH_COMMON_CONFIG, {})
+
+    # ------------------------------------------------------------ 素材预审
+
+    def audit_materials(self, uris: Sequence[str], *, model: str = DEFAULT_MODEL,
+                        scene: int = 1, material_type: int = 1) -> list[dict]:
+        """提交前**预审输入素材**（图/视频/音频）—— **零成本**，不生成。
+
+        🔴 为什么必须做这一步（2026-10-02 用户抓包 + 实测）：
+        **输入图违规是在这里被拦的，根本走不到生成任务**。
+        实测同一接口对两张图给出：
+        · 正常图 → `{"audit_decision": 1}`
+        · 违规图 → `{"audit_decision": 2, "reason_detail": "可能包含低俗内容",
+          "long_reason_detail": "参考图可能包含低俗内容，请修改后重试"}`
+        ⚠️ **`ret=0` 也要看 `data.result_list`** —— 拒绝时上游**照样回
+        `ret=0 / errmsg=success`**（实测两次都是），只看 `ret` 会**全漏判**。
+        ⚠️ `material_type`：抓包实测图片为 `1`（与 omni 的
+        `material_list` 同一套字段）。
+
+        返回 `result_list` 原样（每项至少含 `audit_decision`）。
+        """
+        if not uris:
+            return []
+        body = {"scene": scene, "model_key": model,
+                "material_list": [{"uri": u, "material_type": material_type}
+                                  for u in uris if u]}
+        data = self._post(PATH_AUDIT, body).get("data") or {}
+        out = data.get("result_list")
+        return out if isinstance(out, list) else []
 
     # ------------------------------------------------------------ 取任务
 

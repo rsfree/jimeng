@@ -31,6 +31,7 @@ from typing import Any
 from . import models
 from .ark import resolve_ark_model
 from .config import Settings
+from .negcache import NegativeCache
 from .errors import (
     AdapterError,
     CapabilityNotWiredError,
@@ -71,7 +72,7 @@ from .upstream.jimeng import (
     resolve_video_commerce,
 )
 from .upstream.jimeng.capabilities import ModelConfigCache
-from .upstream.jimeng.client import CODES_SECURITY
+from .upstream.jimeng.client import CODES_SECURITY, is_security_key
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,16 @@ SUBMIT_ROUTES: frozenset[str] = frozenset({
     "t2v", "t2v-fast", "t2v-pro", "t2v-2.5-draft",  # 共用一条路径（T2V_VARIANTS）
     "vfi", "omni-video",
 })
+
+#: 🔴 2026-10-02：**不走 `_submit` 的能力**，及原因。
+#: 必须显式登记（而不是"不在 SUBMIT_ROUTES 里就算��"）——
+#: 否则新加一个这类能力时，门禁会误报"没有提交实现"，逼得后人
+#: 去`_submit` 里硬塞一条分支（那才是真 bug：`audit` 压根不建生成任务）。
+#: 门禁 `test_video.py::test_every_capability_has_a_submit_route` 双向核对。
+NON_SUBMIT_CAPABILITIES: dict[str, str] = {
+    "audit": "素材预审：受理时**同步**调`execute_generate_audit` 出判定，"
+             "不建生成任务（`Service._run_audit`）",
+}
 
 #: 受理请求允许的字段。
 ACCEPTED_FIELDS = frozenset({
@@ -311,6 +322,10 @@ class Service:
         )
         self._cred_secret = fingerprint_secret(self.store)
         self.gate = gate or _build_gate(settings)
+        #: 🔴 2026-10-02：内容审核负缓存（见 `negcache.py`）。
+        #: 审核拒绝是**确定性**的且**照样计费**⇒ 原样重试= 反复扣钱。
+        self.neg = NegativeCache(ttl=settings.neg_cache_ttl,
+                                 max_entries=settings.neg_cache_max)
         self.client = client
         self.uploader = uploader
         self.cfg = cfg
@@ -831,6 +846,18 @@ class Service:
                     f"出图并计费（本次 n={n_raw} 已按此处理）。"
                     f"要自由控制张数请换一个声明了多个取值的模型。")
 
+        # 🔴 2026-10-02：内容审核负缓存 —— **受理时先查**。
+        # 位置很关键：必须在**所有**参数校验（model/size/n/image）**之后**、
+        # 落库**之前** ⇒ ① 参数错误仍然报得更准（不掩盖真因）、
+        # ② 命中时**不建任务**⇒ 不落库、不调上游、**不花钱**。
+        self.neg.raise_if_blocked(
+            cap_id=cap.key or cap.api_id,
+            upstream_model=upstream_model,
+            prompt=prompt,
+            images=image,
+            resolution_tier=tier,
+        )
+
         now = int(time.time())
         rec = TaskRecord(
             task_id=new_task_id(cap.api_id),
@@ -858,6 +885,16 @@ class Service:
             updated_at=now,
         )
         self.store.put(rec)
+
+        # 🔴 2026-10-02：`jimeng-audit`（素材预审）**在受理时同步完成**。
+        # 为什么不用"建任务→派发→轮询"那条通用路：预审本身是**同步接口**
+        # （`execute_generate_audit` 一次调用即出判定），没有"在途态"可言；
+        # 硬套异步只会让调用方多等一轮轮询。
+        # ⚠️ 因此它是本服务**唯一**"受理即终态"的能力 ——
+        #   落库后立刻 patch 成 success/failure，不进协调器队列。
+        if cap.name == "audit":
+            self._run_audit(rec)
+
         OBS.info("task accepted",
                  task_id=rec.task_id, model=rec.model, capability=rec.cap_key,
                  has_image=bool(image), image_count=len(image),
@@ -1024,6 +1061,14 @@ class Service:
             image_uris: list[str] = []
             if cap.image_required:
                 image_uris = self._prepare_input_images(rec)
+                # 🔴 2026-10-02：**输入图预审**（在提交生成**之前**）。
+                # 实测（用户抓包 + 本机探针）：输入图违规是**独立预审接口**
+                # `execute_generate_audit` 拦的，**根本走不到生成任务** ⇒
+                # 在这里拦能**完全省下生成的那笔积分**，
+                # 而事后负缓存只能"下次别再试"（第一次的钱已经花了）。
+                # ⚠️ `ret=0` 不代表通过 —— 拒绝时也回 `ret=0/success`，
+                #   必须看 `result_list[].audit_decision`。
+                self._pre_audit_materials(rec, cap, image_uris)
 
             sid = self._submit(rec, cap, image_uris)
         except AdapterError as e:
@@ -1205,7 +1250,21 @@ class Service:
             return
 
         if st.failed:
-            self._fail(rec, self._terminal_error(st))
+            err = self._terminal_error(st)
+            # 🔴 审核类失败 ⇒ **记入负缓存**（只有内容审核才记：
+            # 上游故障/限流是**可重试**的，缓存它们会把"临时故障"
+            # 变成 6 小时的假禁固，那是比不缓存坏得多的错）。
+            if isinstance(err, ContentPolicyError):
+                self.neg.record_failure(
+                    cap_id=rec.cap_key or rec.model,
+                    upstream_model=rec.upstream_model,
+                    prompt=rec.prompt,
+                    images=rec.image_refs,
+                    resolution_tier=rec.resolution_tier,
+                    reason=(getattr(st, "fail_key", "") or
+                            getattr(st, "failed_reason", "") or "内容审核未通过"),
+                )
+            self._fail(rec, err)
             return
 
         # 🔴 **"至少有 1 张输出"是成功的最低线**（用户口径）：
@@ -1464,6 +1523,106 @@ class Service:
                     f"我们不替你选，选错的代价是按错的档扣费。",
                     param="model")
 
+    def _run_audit(self, rec: TaskRecord) -> None:
+        """`jimeng-audit` 的执行：**受理即终态**（2026-10-02）。
+
+        契约（用户 2026-10-02 拍板）：
+        · **通过** ⇒ `status=success`、**`data` 为空数组**，判定结论写在
+          `degradations`（如"素材预审通过（decision=1）"）。
+          🔴 这是本服务**唯一**豁免"终态成功却零产物 = 失败"的能力 ——
+          预审通过时本来就没有产物，拿"零产物"判失败是错的。
+        · **拒绝** ⇒ `status=failure` + `content_policy_violation`（400、不可重试），
+          并把该素材记入负缓存 ⇒ 同一张图再发直接拒。
+        · **预审接口探不通** ⇒ fail-open 放行（留痕），按"通过"处理。
+        """
+        if self.client is None:
+            self._fail(rec, UpstreamUnavailableError(
+                "未配置上游即梦凭据，无法预审", upstream="jimeng"))
+            return
+        try:
+            blobs = [self._load_media_ref(r) for r in (rec.image_refs or [])]
+            uris = [self._transfer_one(b)[0] for b in blobs]
+            results = self.client.audit_materials(uris,
+                                                 model=rec.upstream_model
+                                                 or DEFAULT_MODEL)
+        except Exception as e:            # noqa: BLE001 —— fail-open，见下
+            log.warning("素材预审失败（放行）task=%s: %s", rec.task_id, e)
+            self.store.patch(
+                rec.task_id, status="success", images=[],
+                degradations=list(rec.degradations) + [
+                    f"⚠️ 素材预审未完成（{type(e).__name__}）⇒ 按**通过**处理；"
+                    f"本次**未出图**（预审能力本就不出图），无法判定素材是否合规。"])
+            return
+        rejected = [r for r in results
+                    if isinstance(r, dict) and r.get("audit_decision") == 2]
+        if not rejected:
+            self.store.patch(
+                rec.task_id, status="success", images=[],
+                degradations=list(rec.degradations) + [
+                    f"✅ 素材预审**通过**（audit_decision="
+                    f"{(results[0] if results else {}).get('audit_decision', 1)}）"
+                    f"—— 共 {len(results)} 项素材均通过。"
+                    f"⚠️ 本能力**不生成任何图**（`data` 为空是预期结果）。"])
+            return
+        first = rejected[0]
+        reason = (first.get("long_reason_detail") or first.get("reason_detail")
+                  or "输入素材未通过内容审核")
+        self.neg.record_failure(
+            cap_id=rec.cap_key or rec.model, upstream_model=rec.upstream_model,
+            prompt=rec.prompt, images=rec.image_refs,
+            resolution_tier=rec.resolution_tier,
+            reason=f"素材预审拒绝：{reason}")
+        self._fail(rec, ContentPolicyError(
+            f"**素材未通过内容审核**（预审判定 audit_decision=2，**未生成、未计费**）："
+            f"{reason}。请更换素材 —— 原样重试必然再被拒。",
+            upstream="jimeng"))
+
+    def _pre_audit_materials(self, rec: TaskRecord, cap: models.Capability,
+                            image_uris: list[str]) -> None:
+        """提交生成**之前**预审输入素材；不过则抛 `ContentPolicyError`。
+
+        🔴 2026-10-02。实测判据（`execute_generate_audit` 的
+        `result_list[].audit_decision`）：**1 = 通过 / 2 = 拒绝**，
+        拒绝时带 `reason_detail` / `long_reason_detail`（如"可能包含低俗内容"）。
+
+        🔴 **探不通时必须放行**（fail-open）：预审是**优化**，不是闸门——
+        上游接口一抖就拒绝所有请求，那是比多花一次钱严重得多的故障。
+        但放行要**留痕**，让调用方知道"这次没预审成"。
+        """
+        if self.client is None or not image_uris:
+            return
+        model_key = rec.upstream_model or DEFAULT_MODEL
+        try:
+            results = self.client.audit_materials(image_uris, model=model_key)
+        except Exception as e:            # noqa: BLE001 —— 见上面 fail-open 的理由
+            log.warning("素材预审失败（放行）task=%s: %s", rec.task_id, e)
+            self.store.patch(
+                rec.task_id,
+                degradations=list(rec.degradations) + [
+                    f"⚠️ 输入素材预审未完成（{type(e).__name__}）⇒ 本次**跳过预审**"
+                    f"直接提交；若因素材违规被拒，费用照常计入。"])
+            return
+        rejected = [r for r in results
+                    if isinstance(r, dict) and r.get("audit_decision") == 2]
+        if not rejected:
+            return
+        first = rejected[0]
+        reason = (first.get("long_reason_detail") or first.get("reason_detail")
+                  or "输入素材未通过内容审核")
+        # 记入负缓存：同一张垫图再发 ⇒ 直接拒，不必再走一遍上传+预审
+        self.neg.record_failure(
+            cap_id=rec.cap_key or rec.model,
+            upstream_model=rec.upstream_model,
+            prompt=rec.prompt,
+            images=rec.image_refs,
+            resolution_tier=rec.resolution_tier,
+            reason=f"输入素材审核拒绝：{reason}",
+        )
+        raise ContentPolicyError(
+            f"**输入素材未通过内容审核**（预审拦下，**未提交生成、未计费**）：{reason}。"
+            f"请更换垫图 —— 原样重试必然再被拒。",
+            upstream="jimeng")
+
     def _submit(self, rec: TaskRecord, cap: models.Capability,
                 image_uris: list[str]) -> str:
         assert self.client is not None
@@ -1641,11 +1800,24 @@ class Service:
         reason = st.failed_reason or st.status_name
         code = st.status
         fc = getattr(st, "fail_code", None)
-        if code in (10, 40) or fc in CODES_SECURITY:
+        fk = (getattr(st, "fail_key", "") or "").strip()
+        # 🔴 2026-10-02：判据必须**同时看 `fail_code` 与 `fail_key`**。
+        # 实测（线上任务库 5 条失败，`jimeng-i2i`）：这两类审核失败的
+        # `fail_code` **全为空**，真因只在字符串 `fail_starling_key` 上：
+        # · `web_fail2generate_copyright_block` → "生成的图片未通过审核"
+        # · `web_text_violates_community_guidelines_toast` → "输入文字不符合平台规则"
+        # 原先只看 `fc in CODES_SECURITY` ⇒ **全部漏判**成
+        # `UpstreamUnavailableError`（"上游故障·可重试"）——
+        # 而它们**必然再被拒，且每次都计费**（实测 message 里就写着
+        # "该任务已被上游计费"）。这不是文案问题，是**分类错误**。
+        if code in (10, 40) or fc in CODES_SECURITY or is_security_key(fk):
             detail = f"，fail_code={fc}" if fc else ""
+            if fk:
+                detail += f"，fail_key={fk}"
             return ContentPolicyError(
                 f"内容审核未通过（status={code} {st.status_name}{detail}）：{reason}。"
-                f"换个 prompt 或换张输入图重试 —— **原样重试没有意义**。",
+                f"换个 prompt 或换张输入图重试 —— **原样重试没有意义**"
+                f"（必然再被拒，且**每次都计费**）。",
                 upstream="jimeng")
         return UpstreamUnavailableError(
             f"上游生成失败（status={code} {st.status_name}）：{reason}。"

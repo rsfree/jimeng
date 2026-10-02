@@ -298,9 +298,11 @@ def test_models_endpoint_lists_only_verified_capabilities(client):
     ids = {m["id"] for m in data["data"]}
     # 🔴 2026-09-24：视频族对外**一律方舟模型名**（内部名退为路由别名，
     # 只出现在条目的 internal_id 字段）；全能参考/补帧是请求形态不单列。
+    # 🔴 2026-10-02 新增 `jimeng-audit`（素材预审）：**成功时零产物**是预期结果
+    # （用户拍板的口径：判定结论在 degradations 里），已豁免"零产物=失败"。
     assert ids == {"jimeng-t2i", "jimeng-i2i", "jimeng-hd",
                    "jimeng-pro-hd", "jimeng-outpaint",
-                   "jimeng-detail-fix",
+                   "jimeng-detail-fix", "jimeng-audit",
                    "doubao-seedance-2-0-mini-260615",
                    "doubao-seedance-2-0-fast-260128",
                    "doubao-seedance-2-0-260128",

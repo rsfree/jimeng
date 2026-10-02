@@ -599,7 +599,9 @@ def test_catalog_hides_deliberately_absent_capabilities():
     expect = {ARK_PUBLIC_MODEL_ID.get(c.api_id, c.api_id) for c in CAPABILITIES
               if not (c.media == "video" and c.name in ("omni-video", "vfi"))}
     assert ids == expect
-    assert len(ids) == 10
+    # 🔴 2026-10-02：原先还有一条 `assert len(ids) == 10` 的**硬编码**条目数，
+    # 与上面"从 CAPABILITIES 派生"的那条**重复**，且每加一个能力就要手改数字
+    # （这次加 `jimeng-audit` 就漏了一次）。已删 —— 派生的那条才是真判据。
     # 🔴 视频族对外用方舟模型名（内部名在 internal_id）；omni/vfi 是请求形态不单列
     assert {"doubao-seedance-2-0-mini-260615", "doubao-seedance-2-0-fast-260128",
             "doubao-seedance-2-0-260128", "doubao-seedance-2-5-260628"} <= ids

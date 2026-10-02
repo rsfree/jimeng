@@ -820,3 +820,77 @@ Lite + `size=4096x4096`（⇒ 4k 档）⇒ 终态 `status=50`、产物 **4096²*
 门禁 `test_lite_is_free_at_2k_but_charged_at_4k` +
 `test_4k_size_is_reported_as_charged_tier`。
 
+## 20. 🔴 素材预审（`execute_generate_audit`）与内容审核负缓存
+
+2026-10-02。用户先问"生成失败信息要加入负缓存"，随后连发三张抓包
+（输出图被拒 / 输入文字被拒 / 垫图被拒）。
+
+### 20.1 先修了一个**分类 bug**（比负缓存更紧急）
+
+查线上任务库发现 **5 条失败任务全被误判**成 `upstream_unavailable`
+（"上游故障·可重试"），而它们其实是**内容审核**拒绝：
+
+| `fail_starling_key` | 含义 | 原判|
+|---|---|---|
+| `web_fail2generate_copyright_block` | **输出图**未通过审核 | ❌上游故障 |
+| `web_text_violates_community_guidelines_toast` | **输入文字**违规 | ❌上游故障 |
+
+🔴 **`fail_code` 在这两例里都是空的** ⇒ 原先只看 `fc in CODES_SECURITY`
+必然全漏判。⇒ 已加 `TaskState.fail_key` + `is_security_key()`
+（子串匹配，覆盖同族变体如 `..._toast` / `..._block`）。
+⚠️ 刻意**不加**裸 `"block"`：太宽，会把非审核类 block 吞进来。
+
+### 20.2 垫图违规是**提交前预审**拦的（不是生成任务的 fail_key）
+
+用户抓包 + 本机探针实测，**有两个**预审接口，**只有一个能同步拿到判定**：
+
+| 接口 | body | 实测响应 | 可用于提交前拦截 |
+|---|---|---|---|
+| `/mweb/v1/imagex/submit_audit_job` | `{"uri_list":[…]}` | **只有 `ret=0`，无 `data`**（fire-and-forget 异步） | ❌拿不到判定 |
+| `/mweb/v1/execute_generate_audit` | `{"scene":1,"model_key":…,"material_list":[{"uri":…,"material_type":1}]}` | `data.result_list[].audit_decision` | ✅ |
+
+实测判定值（`audit_decision`）：
+
+| 素材 | 结果 |
+|---|---|
+| 正常图 | **1**（通过） |
+| 违规垫图 | **2** + `reason_detail="可能包含低俗内容"`、`long_reason_detail="参考图可能包含低俗内容，请修改后重试"` |
+
+🔴 **`ret=0` 不代表通过** —— 拒绝时也回 `ret=0 / errmsg=success`（实测两次都是）
+⇒ 只看 `ret` 会**全漏判**。必须读 `data.result_list[].audit_decision`。
+
+⇒ 已在**派发链**里、上传垫图之后、提交生成**之前**加预审
+（`Service._pre_audit_materials`）：不过则抛 `ContentPolicyError`，
+**完全不提交生成 ⇒ 一分钱不花**（比事后负缓存强：后者第一次的钱已花）。
+🔴 **fail-open**：预审接口探不通就放行 + 留痕 —— 预审是**优化**不是闸门，
+上游一抖就拒所有请求比多花一次钱严重得多。
+
+### 20.3 负缓存（`app/negcache.py`）
+
+键 = `(能力, 上游模型, prompt归一, 输入图集合, 分辨率档)`，sha256 截断 16 字节。
+· **只记内容审核**：上游故障/限流是可重试的，缓存它们 = 制造 6 小时假禁固。
+· **不做语义归一**（只折叠空白 + 小写）⇒宁可漏缓存（多花一次钱），
+  不可错杀（把本该过的请求挡掉）。
+· TTL **6 小时**（`NEG_CACHE_TTL`，设 0 即关闭）+ 有界 LRU 2048（`NEG_CACHE_MAX`）。
+· 受理时**先查后建**（不落库、不调上游、不花钱）。
+· 进程内、不跨实例：多副本各持一份 ⇒ 命中率打折，但**不会错杀**。
+
+### 20.4 新能力 `jimeng-audit`（只判能不能用，不出图）
+
+用户口径"把这个能力也做成一个模型"。它是本服务**唯一**"受理即终态"的能力
+（预审本身同步，无在途态）：
+
+| 结果 | 响应 |
+|---|---|
+| 通过 | `status=success`、**`data: []`**、判定在 `degradations`（"预审通过（audit_decision=1）"） |
+| 拒绝 | `status=failure` + `content_policy_violation`（400 不可重试）+ 记入负缓存 |
+| 探不通 | fail-open，按"通过"处理 + 留痕 |
+
+🔴 它是**唯一豁免"终态成功却零产物 = 失败"**的能力 —— 预审通过时本来就没有产物。
+登记在 `NON_SUBMIT_CAPABILITIES`（不走 `_submit`），门禁双向核对。
+
+### 20.5 顺带删掉一处会反复咬人的硬编码
+`test_catalog_hides_deliberately_absent_capabilities` 里有一条
+`assert len(ids) == 10`，与上面"从 `CAPABILITIES` 派生"的那条**重复**，
+每加一个能力就要手改数字（这次加 `jimeng-audit` 就漏了一次）⇒ 已删。
+

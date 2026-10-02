@@ -490,6 +490,25 @@ CAPABILITIES: tuple[Capability, ...] = (
               "方舟门面后，本能力暂无 HTTP 入口（内部链路保留，待补帧入口设计）。",
     ),
     Capability(
+        key="jimeng:audit", name="audit", title="素材预审（只判能不能用，不出图）",
+        accepts_image=True, image_required=True, prompt_required=False,
+        credits_measured=0, max_images=4,
+        notes="🔴 **唯一一个成功时没有产物的能力**（2026-10-02 用户口径）。"
+              "它只回答『这张垫图/ 参考图能不能用』，**不生成任何图**。"
+              "走上游 `execute_generate_audit` 同步判定："
+              "`audit_decision` **1=通过 / 2=拒绝**（拒绝带 `reason_detail`，"
+              "实测有『可能包含低俗内容』）。"
+              "⚠️ **`ret=0` 不代表通过** —— 拒绝时也回 `ret=0/errmsg=success`，"
+              "只看 `ret` 会全漏判。"
+              "**成功时 `data` 为空数组**，判定结论在 `degradations` 里"
+              "（如『素材预审通过（decision=1）』）—— 这是本服务**唯一**"
+              "豁免『终态成功却零产物 = 失败』的能力，因为预审通过时"
+              "本来就没有产物。"
+              "💡 用途：**花钱前先验素材**。生成链路已在提交前自动预审"
+              "（fail-open），本能力是把它**显式暴露**给调用方"
+              "（批量筛素材、或只想知道某图能否用）。",
+    ),
+    Capability(
         key="jimeng:detail-fix", name="detail-fix", title="细节修复（SuperResolution）",
         accepts_image=False, image_required=False, prompt_required=False,
         jimeng_tool="detail", credits_measured=0, needs_source_ref=True,

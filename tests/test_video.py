@@ -799,13 +799,21 @@ def test_every_capability_has_a_submit_route():
     纯静态对照：改注册表 / 改路由表任一边忘了同步，这里都会红。
     """
     from app.models import CAPABILITIES, T2V_VARIANTS
-    from app.service import SUBMIT_ROUTES
+    from app.service import NON_SUBMIT_CAPABILITIES, SUBMIT_ROUTES
 
+    # 🔴 2026-10-02：能力分两类 —— 走 `_submit` 的（SUBMIT_ROUTES）
+    # 与**不走**的（NON_SUBMIT_CAPABILITIES，必须显式登记原因）。
+    # 两边都要覆盖：新能力漏登记任一侧都会红。
     names = {c.name for c in CAPABILITIES}
-    assert not (names - SUBMIT_ROUTES), \
-        f"这些能力没有提交实现：{sorted(names - SUBMIT_ROUTES)}"
-    assert not (SUBMIT_ROUTES - names), \
-        f"路由表里有注册表没有的能力（改完注册表忘删了？）：{sorted(SUBMIT_ROUTES - names)}"
+    non_submit = set(NON_SUBMIT_CAPABILITIES)   # 它是 dict（能力名 → 原因）
+    assert not (non_submit - names), \
+        f"登记了不存在的能力：{sorted(non_submit - names)}"
+    routed = names - non_submit
+    assert not (routed - SUBMIT_ROUTES), \
+        f"这些能力没有提交实现：{sorted(routed - SUBMIT_ROUTES)}"
+    assert not (SUBMIT_ROUTES - routed), \
+        f"路由表里有注册表没有的能力（改完注册表忘删了？）：{sorted(SUBMIT_ROUTES - routed)}"
+
     assert T2V_VARIANTS <= SUBMIT_ROUTES, "t2v 变体必须共用同一条视频提交路径"
 
 
