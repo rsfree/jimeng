@@ -11,6 +11,7 @@ from app.models import (
     DELIBERATE_ABSENCES,
     catalog,
     is_placeholder,
+    split_tier_suffix,
     resolve,
     take_fallback_note,
 )
@@ -794,3 +795,103 @@ def test_4k_size_is_reported_as_charged_tier():
     assert "image_basic_v5_4k" in src, \
         "留痕文案要指名真实计费项，让调用方能自己去上游对账"
     assert "degradations.append" in src, "留痕必须进 degradations（会被回给调用方）"
+
+# ---------------------------------------------------------------------------
+# model 后缀指定分辨率档（2026-10-02 方案 B）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("written,base,tier", [
+    ("high_aes_general_v50-4k", "high_aes_general_v50", "4k"),
+    ("Seedream 5.0 Lite 4k", "Seedream 5.0 Lite", "4k"),
+    ("mj-v8.2-2k", "mj-v8.2", "2k"),
+    ("mj82 1k", "mj82", "1k"),
+    ("图片美学模型 V8.2-1.5k", "图片美学模型 V8.2", "1.5k"),
+    # 无后缀 ⇒ 原样返回
+    ("mj-v8.2", "mj-v8.2", None),
+    ("high_aes_general_v50", "high_aes_general_v50", None),
+])
+def test_tier_suffix_is_split(written, base, tier):
+    """`model` 尾部**精确后缀** `-2k`/`-4k`/`-1k`/`-1.5k` 能被拆出。
+
+    🔴 **base 必须保持原文**（不能归一）：上游 key 分支是**逐字精确匹配**，
+    归一后的 `high-aes-general-v50` 会查不中（实测报"未知 model"）。
+    """
+    from app.models import split_tier_suffix
+
+    got_base, got_tier = split_tier_suffix(written)
+    assert got_tier == tier, f"{written!r} 档位拆错：{got_tier!r} != {tier!r}"
+    assert got_base == base, f"{written!r} 的 base 应保持原文"
+
+
+@pytest.mark.parametrize("written", [
+    # 🔴 方舟名**本来就以数字结尾** ⇒ 若按"尾数字推断档位"会全判错。
+    # 这条是**精确后缀 + 末尾锚定**的回归锁。
+    "doubao-seedream-5-0-pro-260628",
+    "doubao-seedream-5-0-flash-260915",
+    "doubao-seedream-5-0-260128",
+    # 4.x 面板名/短名（含数字，不能当档位）
+    "4-7", "4-6", "4-5", "4-1", "4-0", "5.0 Lite", "图片美学模型 V8.2",
+    # 裸档位名（无连字符分隔 ⇒ 不拆）
+    "4k", "2k", "1.5k",
+])
+def test_names_ending_with_digits_are_not_mistaken_for_tier(written):
+    """🔴 名字里的数字**绝不能**被误当成档位后缀。
+
+    尤其方舟名（`...-260628`）—— 它的日期后缀与"档位"长得像，
+    但按尾数字推断会把**所有**方舟名都判成高档位。
+    """
+    from app.models import split_tier_suffix
+
+    got_base, got_tier = split_tier_suffix(written)
+    assert got_tier is None, f"{written!r} 被误判成 {got_tier!r} 档"
+    assert got_base == written, f"{written!r} 不该被拆分"
+
+
+def test_tier_suffix_base_must_still_resolve():
+    """带后缀的 model 拆出 base 后，**必须仍能 resolve** —— 否则是死路。
+
+    这条挡住一类实现走偏：正则拆得很漂亮，但 base 查不中 ⇒
+    "带后缀就报未知模型"，比不支持还糟。
+    """
+    for written, expect in [("high_aes_general_v50-4k", "high_aes_general_v50"),
+                            ("mj-v8.2-2k", "jm_image_model_yc_mj82"),
+                            ("Seedream 5.0 Pro 4k", "high_aes_general_v50p_large")]:
+        base, tier = split_tier_suffix(written)
+        assert tier, written
+        cap, model = resolve(base, has_image=False)
+        assert model == expect, f"{written!r} 的 base 解析到了 {model!r}"
+
+
+def test_conflicting_tier_and_size_is_rejected_not_silently_resolved():
+    """🔴 方案 B 核心：`model` 后缀与 `size` **冲突 ⇒ 当场 400**。
+
+    为什么不静默取一个：两者表达**同一件事**（档位），取任一个都是
+    "替调用方做决定"，而取错的代价是**按错的档计费**
+    （Lite 2k 免费 / 4k 收 4）。
+    """
+    import inspect
+    from app.service import Service
+
+    src = inspect.getsource(Service._check_tier)
+    assert "档位自相矛盾" in src, "必须有一致性冲突的报错分支"
+    assert "size_tier != tier" in src, "判据必须是『两个入口给出的档位不同』"
+    assert "不替你选" in src, "报错要说清我们不替他做决定（而不是偷偷改）"
+
+
+def test_tier_not_supported_by_model_is_rejected():
+    """🔴 该模型**没有**这一档 ⇒ 400，**绝不静默退回**别的档。
+
+    Flash 只有 1.5k/2k、mj82 只有 1k/2k —— 写 `-4k` 必须明确报错，
+    否则就是"以为买了 4k、实际拿 2k 并按 2k 计费"。
+    """
+    import inspect
+    from app.service import Service
+
+    src = inspect.getsource(Service._check_tier)
+    assert "不被该模型支持" in src, "必须有『该模型不支持这一档』的分支"
+    assert "不会静默退回" in src, "要写明不会静默降档"
+    # 支持性只认服务端能力表
+    assert "resolution_map" in src, \
+        "档位支持性必须读服务端 resolution_map，不能写死"
+

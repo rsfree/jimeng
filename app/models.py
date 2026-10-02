@@ -26,6 +26,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 from .errors import InvalidParameterError
@@ -615,6 +617,59 @@ def _hint() -> str:
             f"中文别名、web 面板名（如 `Seedream 5.0 Flash` / `5.0 Lite` / `4.7`），"
             f"或直接写上游模型 key（如 {DEFAULT_UPSTREAM_MODEL}）。"
             f"完整清单见 GET /v1/models")
+
+
+#: 🔴 **model 名可用后缀指定分辨率档**（2026-10-02 用户口径，方案 B）。
+#:
+#: 动机：`credits_measured` / "某模型免费"这类说法**只对某个档成立**
+#: （Lite 2k 免费 / 4k 收费），调用方需要一种**不依赖 `size`** 就能指名档位的写法。
+#:
+#: 🔴 **只认精确后缀 `-1k` / `-1.5k` / `-2k` / `-4k`**，绝不做"尾数字推断"：
+#: 方舟模型名**本来就以数字结尾**（`doubao-seedream-5-0-pro-260628`、
+#: `...-flash-260915`、`...-260128`）⇒ "取末段数字当档位"会把它们全判错。
+#: 精确后缀 + 末尾锚定（`$`）⇒ 上面这些**一律不匹配**（已验证）。
+#: 也不做裸 `4k`（无连字符）：`4-7` / `4-0` 这类 4.x 面板名会撞。
+#:
+#: 档位取值**不是全集**，只有服务端 `resolution_map` 实际声明的才算 ——
+#: Flash（1.5k/2k）与 mj82（1k/2k）**没有 4k**，写 `-4k` 会明确 400，
+#: **绝不静默退回 2k**（否则"以为买了 4k、实际拿 2k 并按 2k 计费"）。
+#: ⚠️ 匹配**原始串**（不预先归一）：归一会把 `high_aes_general_v50` 变成
+#: `high-aes-general-v50`，而上游 key 分支是**逐字精确匹配** ⇒ 归一后的 base
+#: 会查不中（实测报"未知 model"）。所以只切**末尾**那一段，前段保持原样。
+_TIER_SUFFIX_RE = re.compile(
+    r"^(?P<base>.+?)[\s_-]+(?P<tier>1\.5k|1k|2k|4k)$", re.IGNORECASE)
+
+#: 后缀 → 服务端 `resolution_map` 里的键（大小写已归一）。
+_TIER_CANON = {"1k": "1k", "1.5k": "1.5k", "2k": "2k", "4k": "4k"}
+
+
+def split_tier_suffix(model: str | None) -> tuple[str | None, str | None]:
+    """拆出 `model` 尾部的分辨率档后缀。
+
+    返回 `(base_model, tier)`：
+      · 没带后缀 ⇒ `(原样model, None)`；
+      · 带了 ⇒ `(去掉后缀的部分, "2k"/"4k"/…)`。
+
+    ⚠️ 这是**纯语法拆分**，**不查表、不判存在性** —— 该档位这个模型到底
+    支不支持，由调用方拿服务端 `resolution_map` 校验（见 `tier_supported`）。
+    拆开两段是为了让"解析"与"校验"各自独立、可单独测试。
+    """
+    raw = (model or "").strip()
+    if not raw:
+        return None, None
+    m = _TIER_SUFFIX_RE.match(raw)
+    if not m:
+        return raw, None
+    return m.group("base").strip(), _TIER_CANON[m.group("tier").lower()]
+
+
+def tier_supported(tier: str | None) -> bool:
+    """该档位是否是**任何**已登记模型声明过的（粗筛，避免对明显不存在的档报错）。
+
+    真正的"这个模型支不支持这一档"要读服务端 `resolution_map` ——
+    那是运行期数据、此处不联网。调用方应优先用 `self.cfg.resolution_map(model)`。
+    """
+    return tier in _TIER_CANON.values()
 
 
 def upstream_supports_blend(upstream_key: str) -> bool:

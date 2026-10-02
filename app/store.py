@@ -127,6 +127,11 @@ class TaskRecord(SQLModel, table=True):
     image_refs: list = Field(default_factory=list,
                             sa_column=Column(JSON_COL, nullable=False))
     size: Optional[str] = None
+    #: 🔴 2026-10-02（方案 B）：`model` 后缀指定的分辨率档（如 "4k"）。
+    #: 为 None 表示"没指定、按 size 就近吸附"。
+    #: 必须**落库** —— 受理与`_submit` 是两个阶段（可能跨进程/重启），
+    #: 不落库就会在派发时丢掉后缀，提交包又回到"按 size 吸附"的老路。
+    resolution_tier: Optional[str] = None
     n: Optional[int] = None
     seed: Optional[int] = None
     negative_prompt: str = ""

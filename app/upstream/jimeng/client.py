@@ -1526,7 +1526,8 @@ class JimengClient:
                size: str = DEFAULT_SIZE, count: int = 1,
                negative_prompt: str = "", seed: int | None = None,
                submit_id: str | None = None, dry_run: bool = False,
-               count_options: tuple[int, ...] | None = None) -> str:
+               count_options: tuple[int, ...] | None = None,
+               resolution_type: str | None = None) -> str:
         """建任务，返回 `submit_id`（**计费动作**）。
 
         `submit_id` 由客户端生成 ⇒ 调用方拿到它就能独立轮询，不必依赖本次回执。
@@ -1537,7 +1538,8 @@ class JimengClient:
         self.last_warnings = [warn] if warn else []
         draft = build_draft(prompt=prompt, model=model, count=count,
                             width=width, height=height,
-                            negative_prompt=negative_prompt, seed=seed)
+                            negative_prompt=negative_prompt, seed=seed,
+                            resolution_type=resolution_type)
         sid = submit_id or _uid()
         if dry_run:
             return sid
@@ -1566,7 +1568,8 @@ class JimengClient:
               submit_id: str | None = None, dry_run: bool = False,
               image_uris: Sequence[str] | None = None,
               count: int = 1,
-              count_options: tuple[int, ...] | None = None) -> str:
+              count_options: tuple[int, ...] | None = None,
+              resolution_type: str | None = None) -> str:
         """提交一个**图生图（blend）**任务，返回 `submit_id`（**计费动作**）。
 
         结构照抄账号历史里的真实 blend 样本。
@@ -1585,7 +1588,8 @@ class JimengClient:
                                   image_uri=image_uri,
                                   image_url=image_url, source_from=source_from,
                                   model=model, strength=strength,
-                                  width=width, height=height, count=count)
+                                  width=width, height=height, count=count,
+                                  resolution_type=resolution_type)
         sid = submit_id or _uid()
         if dry_run:
             return sid

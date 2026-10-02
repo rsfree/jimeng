@@ -465,6 +465,15 @@ Authorization: Bearer <key>
    **后者覆盖前者、静默丢掉 4 个模型** —— 而 `/v1/models` 里两条还都显示着它，
    看着完全正常。门禁 `test_ark_name_is_one_to_one_and_never_collapses`。
 
+6. 🔴 **`model` 可用后缀指定分辨率档**（2026-10-02 方案 B）：
+   `Seedream 5.0 Lite 4k` / `mj-v8.2-2k` / `high_aes_general_v50-4k`
+   （后缀取 `-1k` / `-1.5k` / `-2k` / `-4k`，也接受空格写法）。
+   **只认精确后缀** ⇒ 方舟名（`...-260628`）与 `4-7` 这类面板名不会被误判。
+   **两处冲突当场 400，绝不静默取一个**：
+     · 与 `size` 表达的档位不一致 ⇒ 400（两者是同一件事）；
+     · 该模型**服务端没声明**这一档（如 Flash 无 4k、mj82 无 4k）⇒ 400，
+       **绝不静默退回** 2k（那会"以为买了 4k、实际按 2k 计费"）。
+
 `GET /v1/models` 的 **`jimeng-t2i`** 条目里带 `upstream_models`，
 逐项给出 `{key, web_name, ark_name, credits_measured}` —— 调用方不必去别处对照名字。
 （`credits_measured` 是**按模型**的实测值，不是能力级单价；`ark_name` 是可原样传的

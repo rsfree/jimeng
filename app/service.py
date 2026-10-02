@@ -485,8 +485,23 @@ class Service:
                     eff_model = "jimeng-t2v"
             elif body.get("source_task_id"):
                 eff_model = "jimeng-detail-fix"   # 图片端点：引用既有作品修复
+        # 🔴 2026-10-02（方案 B，用户拍板）：`model` 可用**后缀**指定分辨率档，
+        # 如 `Seedream 5.0 Lite 4k` / `mj-v8.2-2k` / `high_aes_general_v50-4k`。
+        # 拆分在 resolve **之前**做（后缀不该进模型查表）。
+        base_model, tier = models.split_tier_suffix(eff_model)
+        if tier and not video:
+            eff_model = base_model
         cap, upstream_model = models.resolve(eff_model, has_image=bool(image),
                                             n_images=len(image), video=video)
+
+        #: 🔴 方案 B = **冲突当场 400，绝不静默取一个**。
+        #: 为什么不静默取舍：`model` 后缀与 `size` 表达的是**同一件事**
+        #: （档位），两个入口给不同答案时，取任一个都是"替调用方做决定"——
+        #: 而取错的代价是**按错的档计费**（Lite 2k 免费 / 4k 收 4）。
+        if tier and not video:
+            self._check_tier(tier=tier, raw=eff_model,
+                             model_key=upstream_model or DEFAULT_MODEL,
+                             size=body.get("size"))
         #: 🔴 **占位名兜底的留痕**（2026-10-02）。调用方显式写了一个我们没登记的
         #: 型号（`seedream-9-9-ultra` / `doubao-seedream-5-0-pro-260628` …），
         #: 按占位处理 ⇒ 兜底到默认档出图。**兜底本身是允许的**（免费档，不掏钱），
@@ -827,6 +842,7 @@ class Service:
             prompt=prompt,
             image_refs=image,
             size=str(size),
+            resolution_tier=tier,
             n=n,
             seed=seed,
             negative_prompt=str(body.get("negative_prompt") or ""),
@@ -1393,6 +1409,61 @@ class Service:
                  cached=cached)
         return uris
 
+    def _check_tier(self, *, tier: str, raw: str | None, model_key: str,
+                    size: Any) -> None:
+        """校验 `model` 后缀指定的分辨率档（2026-10-02 方案 B）。
+
+        三道关，**任何一道不过就当场 400**，绝不静默调整：
+
+        1. **档位存在吗** —— 只认`-1k` / `-1.5k` / `-2k` / `-4k`；
+           其它写法压根不会被 `split_tier_suffix` 拆出来（那里已挡）。
+        2. **该模型支持这一档吗** —— 读**服务端 `resolution_map`**
+           （`high_aes_general_v50_flash` 只有 1.5k/2k、mj82 只有 1k/2k）。
+           🔴 读不到 ⇒ **保守拒绝**：宁可报错，也不"猜一个相近的档跑"
+           （那等于"以为买了 4k、实际拿 2k 并按 2k 计费"）。
+        3. **与 `size` 冲突吗** —— `size` 也能表达档位；两个入口给不同答案
+           就是**自相矛盾**（今天`resolution_type` 硬编码那个 bug 就是
+           `1024x1024 / 2k` 这种矛盾长期没人发现）⇒ 当场 400，让调用方决定。
+        """
+        from .upstream.jimeng.client import (  # noqa: PLC0415
+            resolution_type_for_size,
+        )
+
+        # ---- 2. 该模型支持这一档吗（只认服务端声明）----
+        rmap = self.cfg.resolution_map(model_key) if self.cfg else None
+        if rmap:
+            tiers = {str(t).lower() for t in rmap}
+            if tier not in tiers:
+                raise InvalidParameterError(
+                    f"model 后缀指定的档位 **{tier}** 不被该模型支持"
+                    f"（{model_key} 服务端只声明 {sorted(tiers)}）。"
+                    f"请改用其中之一，或去掉后缀用 size 表达。"
+                    f"⚠️ 不会静默退回其它档 —— 那会按错的档计费。",
+                    param="model")
+        elif self.cfg is not None and self.cfg.snapshot() is not None:
+            # 能力表读到了、但这个模型不在表里 ⇒ 无法证明它支持该档
+            raise InvalidParameterError(
+                f"无法确认模型 {model_key} 是否支持 **{tier}** 档"
+                f"（它不在服务端能力表里）。请去掉后缀，或换一个已登记的模型。",
+                param="model")
+
+        # ---- 3. 与 size 冲突吗 ----
+        if size:
+            try:
+                w, h = parse_size(str(size))
+                size_tier = resolution_type_for_size(w, h)
+            except Exception:            # noqa: BLE001 —— size 已在校验链里查过
+                size_tier = None
+            if size_tier and size_tier != tier:
+                raise InvalidParameterError(
+                    f"**档位自相矛盾**：model 后缀要 {tier}，"
+                    f"而 size={size} 对应 {size_tier}。"
+                    f"两者表达的是同一件事（本服务按此档计费）——"
+                    f"请只留一个：要么写 model 的 {tier} 后缀，"
+                    f"要么写 size={size}（去掉后缀）。"
+                    f"我们不替你选，选错的代价是按错的档扣费。",
+                    param="model")
+
     def _submit(self, rec: TaskRecord, cap: models.Capability,
                 image_uris: list[str]) -> str:
         assert self.client is not None
@@ -1400,10 +1471,12 @@ class Service:
         if cap.name == "t2i":
             model_key = rec.upstream_model or DEFAULT_MODEL
             opts = self.cfg.count_options(model_key) if self.cfg else None
+            # 🔴 2026-10-02（方案 B）：`model` 后缀指定的档位**优先于 size 吸附**
+            # （受理时已校验过"后缀与 size 不冲突"，这里只管把档带下去）。
             sid = self.client.submit(
                 rec.prompt, model=model_key, size=size, count=rec.n or 1,
                 negative_prompt=rec.negative_prompt, seed=rec.seed,
-                count_options=opts)
+                count_options=opts, resolution_type=rec.resolution_tier)
         elif cap.name in models.T2V_VARIANTS:
             # 文生视频族（t2v / t2v-fast / t2v-pro）：三者**提交路径完全相同**，
             # 只差 `video_model`；模型与计费档位由 client.submit_video 按白名单定，
@@ -1499,7 +1572,8 @@ class Service:
             opts = self.cfg.count_options(model_key) if self.cfg else None
             sid = self.client.blend(rec.prompt, image_uris=image_uris, size=size,
                                     count=rec.n or 1, count_options=opts,
-                                    model=model_key)
+                                    model=model_key,
+                                    resolution_type=rec.resolution_tier)
         elif cap.jimeng_tool:
             # 后编辑族（hd / pro-hd / outpaint）：上游用单个 `origin_image` 承载输入图，
             # 但**张数同样是 `abilities.gen_option.gen_count`**（组件级字段）⇒ 一并传。
