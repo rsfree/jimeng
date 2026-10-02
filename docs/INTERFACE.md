@@ -453,20 +453,25 @@ Authorization: Bearer <key>
    成默认模型。
 4. **第三方 SDK 的 `doubao-seedream-5-0-pro-260628` 仍按占位名处理**（等价于没写
    `model` ⇒ 默认 Lite）。**刻意不映射到 Pro**：那等于替调用方悄悄换到收费链路。
+5. **`doubao-seedream-5-0-flash-260915`（方舟图片模型名）可原样传** ⇒ 命中
+   `high_aes_general_v50_flash`（2026-10-02 起）。它自带 `doubao-seedream` 前缀，
+   靠"别名判在占位判之前"这条从占位里救回来 —— **已登记**的方舟名走真模型，
+   **未登记**的仍落回默认 Lite（见第 4 条，两者刻意分叉）。
 
 `GET /v1/models` 的 **`jimeng-t2i`** 条目里带 `upstream_models`，
-逐项给出 `{key, web_name, credits_measured}` —— 调用方不必去别处对照名字。
-（`credits_measured` 是**能力级**实测值，**不是**按模型分档的单价。）
+逐项给出 `{key, web_name, ark_name, credits_measured}` —— 调用方不必去别处对照名字。
+（`credits_measured` 是**按模型**的实测值，不是能力级单价；`ark_name` 是可原样传的
+**火山方舟模型名**，该档位没有方舟对应名时为 `null`。）
 
 **上游模型 key —— 已登记的 8 个**（可直接当 `model` 传，等价于 `jimeng-t2i` + 该模型）：
 
-| `model` 传这个 key | 上游名字 | 张数选项 | 实测单价 |
-|---|---|---|---|
-| `high_aes_general_v50_flash` 🆕 | **Seedream 5.0 Flash** | **1..4** | 未测 |
-| `high_aes_general_v50`（**默认**） | Seedream 5.0 **Lite** | 1..8 | **0（免费）** |
-| `high_aes_general_v50p_large` | **Seedream 5.0 Pro** | **1..4** | **8/张** |
-| `high_aes_general_v43` | Seedream 4.7 | 1..8 | 未测 |
-| `high_aes_general_v42` | Seedream 4.6 | 1..8 | 未测 |
+| `model` 传这个 key | 上游名字 | 方舟对应名 | 张数选项 | 实测单价 |
+|---|---|---|---|---|
+| `high_aes_general_v50_flash` | **Seedream 5.0 Flash** | `doubao-seedream-5-0-flash-260915` | **1..4** | **3/张** |
+| `high_aes_general_v50`（**默认**） | Seedream 5.0 **Lite** | — | 1..8 | **0（免费）** |
+| `high_aes_general_v50p_large` | **Seedream 5.0 Pro** | — | **1..4** | **8/张** |
+| `high_aes_general_v43` | Seedream 4.7 | — | 1..8 | 未测 |
+| `high_aes_general_v42` | Seedream 4.6 | — | 1..8 | 未测 |
 | `high_aes_general_v40l` | Seedream 4.5 | 1..8 | 未测 |
 | `high_aes_general_v41` | Seedream 4.1 | 1..8 | 未测 |
 | `high_aes_general_v40` | Seedream 4.0 | 1..8 | 未测 |

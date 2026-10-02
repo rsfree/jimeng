@@ -83,6 +83,26 @@ def _norm_model_name(raw: str) -> str:
     return s.strip("-")
 
 
+#: 上游 key → **火山方舟模型名**（2026-10-02 用户口径"图片族也对齐方舟命名"）。
+#:
+#: 背景：视频族 2026-09-24 起已全面改用方舟模型名对外（见 `ARK_PUBLIC_MODEL_ID`），
+#: 图片族这次跟上。调用方手上拿到的往往就是方舟的模型名（从方舟控制台/文档抄来的），
+#: 让它**原样可传**，省掉"方舟名 → 即梦面板名 → 上游 key"的人工换算。
+#:
+#: 🔴 **只登记调用方点名要的那几个**，不做前缀通配：
+#: 方舟图片模型名形如 `doubao-seedream-<版本>-<档位>-<日期>`，而即梦侧只有
+#: **已实测过**的档位能跑（见 `UPSTREAM_MODEL_KEYS`）。未登记的方舟名
+#: （如 `doubao-seedream-5-0-pro-260628`）仍按**占位名**处理 —— 那是
+#: "刻意不认"，不是漏认：认了它就等于替调用方悄悄换到 8 积分/张的 Pro 链路。
+#: 缺哪个档位要显式加进本表，并在 `UPSTREAM_MODEL_CREDITS` 补实测价。
+#:
+#: 门禁：`tests/test_models.py::test_ark_image_names_resolve_to_registered_models`
+#: 逐条断言"键集合 ⊆ 已登记 key"+"逐条能 resolve"。
+UPSTREAM_ARK_NAMES: dict[str, str] = {
+    "high_aes_general_v50_flash": "doubao-seedream-5-0-flash-260915",
+}
+
+
 #: **web 面板名 → 上游模型 key**。数据源 = 服务端能力表的 `model_name` /
 #: `generation_category_name`（2026-09-23 实读 10 条），**不是猜的**；
 #: 每种写法都给三条：完整名、版本短名、面板分类名。查表前先过 `_norm_model_name`。
@@ -124,6 +144,20 @@ UPSTREAM_MODEL_ALIASES: dict[str, str] = {
     "4-0": "high_aes_general_v40",
     "图片-4-0": "high_aes_general_v40",
 }
+
+#: 🔴 **方舟模型名并进别名表**（2026-10-02）—— 这一步是让方舟名能"穿过"
+#: `PLACEHOLDER_PREFIXES` 里 `doubao-seedream` 前缀的**唯一**机关：
+#: `resolve` 判别名时用的是 `norm in UPSTREAM_MODEL_ALIASES`，
+#: 它在 `is_placeholder()` **之前**生效（见下面 `resolve` 的注释）。
+#: 不并进来 = 方舟名被当占位名静默降级成默认 Lite（"点了 Flash 拿到 Lite"）。
+#:
+#: 归一后写入（`_norm_model_name`），所以查表键是小写连字符形态。
+#: 这里**不写死字面量**，改为从 `UPSTREAM_ARK_NAMES` 反向派生：
+#: 两张表一旦漂移（加了 ARK 名忘了加别名，或反之），门禁立刻红。
+UPSTREAM_MODEL_ALIASES.update({
+    _norm_model_name(ark_name): upstream_key
+    for upstream_key, ark_name in UPSTREAM_ARK_NAMES.items()
+})
 
 #: 面板上有、**本服务未登记**的模型名 → 未登记的理由（key 保留完整以便追溯）。
 #: 依据：`high_aes_general_v30l*` 系列实测 `ret=1006` 权益不足
@@ -245,7 +279,8 @@ CAPABILITIES: tuple[Capability, ...] = (
               "已登记 8 个（每个的**实测单价见 catalog 的 `upstream_models`**——"
               "能力级那个 0 只是 Lite 口径）：`high_aes_general_v50_flash`"
               "（Seedream 5.0 Flash，3/张，2026-09-23 实跑）、"
-              "`high_aes_general_v50`（5.0 Lite，0，默认）、"
+              "`high_aes_general_v50`（5.0 Lite，0，默认，"
+              "**方舟对应名 `doubao-seedream-5-0-flash-260915` 可原样传**），"
               "`high_aes_general_v50p_large`（5.0 Pro，8/张）、"
               "4.7 / 4.6 / 4.5 / 4.1 / 4.0（未测）。",
     ),
@@ -504,9 +539,13 @@ def resolve(model: str | None, *, has_image: bool,
     #: 🔴 别名与"未登记面板名"必须判在**占位判之前**：面板名 `Seedream 5.0 Flash`
     #: 自带 `seedream` 前缀（在 `PLACEHOLDER_PREFIXES` 里），若先判占位就会被
     #: 静默降级成默认模型 —— 表现为"调用方点了 Flash、拿到 Lite"。
-    #: 而 `doubao-seedream-5-0-pro-260628` 这类**带厂商前缀+日期后缀**的形态
-    #: 命不中别名，仍按占位处理（它们不代表调用意图，也**不能**被映射到收费档 ——
-    #: 那等于替调用方悄悄换到 8 积分/张的链路）。
+    #:
+    #: 🔴 2026-10-02：`doubao-seedream-*`（方舟图片模型名）同样靠这条从占位里
+    #: 救回来 —— **已登记进 `UPSTREAM_MODEL_ALIASES` 的**（目前 Flash，
+    #: 由 `UPSTREAM_ARK_NAMES` 派生）按别名走真模型；**未登记的**
+    #: （如 `doubao-seedream-5-0-pro-260628`）命不中别名，**仍按占位处理**。
+    #: 这个分叉是刻意的：认一个没实测过的方舟名 = 替调用方悄悄换到
+    #: 8 积分/张的 Pro 链路（"占位名走默认 Lite"只差 8 积分，但不能这么坑人）。
     if raw and (not is_placeholder(raw)
                 or norm in UPSTREAM_MODEL_ALIASES
                 or norm in UNSUPPORTED_WEB_MODELS):
@@ -643,8 +682,12 @@ def catalog() -> list[dict]:
             "internal_id": c.api_id,
         }
         if c.name == _UPSTREAM_FAMILY:
+            #: 🔴 `ark_name` = **可原样当 `model` 传**的方舟模型名（2026-10-02）。
+            #: 没有方舟名的档位给 `None`（**不是空串**）—— 空串会被调用方
+            #: 当成"有个名字叫空"，`None` 才能表达"这一档没有方舟对应名"。
             item["upstream_models"] = [
                 {"key": k, "web_name": UPSTREAM_WEB_NAMES.get(k, ""),
+                 "ark_name": UPSTREAM_ARK_NAMES.get(k),
                  #: 🔴 用**按模型**的实测价，不是能力级的值 —— 见
                  #: `UPSTREAM_MODEL_CREDITS` 的注释（能力级是 Lite 口径）
                  "credits_measured": UPSTREAM_MODEL_CREDITS.get(k)}
@@ -663,4 +706,5 @@ __all__ = [
     "resolve", "is_placeholder", "DELIBERATE_ABSENCES",
     "DEFAULT_UPSTREAM_MODEL", "UPSTREAM_MODEL_KEYS", "PLACEHOLDER_MODELS",
     "UPSTREAM_MODEL_ALIASES", "UNSUPPORTED_WEB_MODELS", "UPSTREAM_WEB_NAMES",
+    "UPSTREAM_ARK_NAMES",
 ]

@@ -145,6 +145,99 @@ def test_unregistered_web_models_are_rejected_with_a_reason():
         assert key in e.value.message, "报错要能追到上游 key"
 
 
+@pytest.mark.parametrize("written,expect", [
+    ("doubao-seedream-5-0-flash-260915", "high_aes_general_v50_flash"),
+    ("Doubao-Seedream-5-0-Flash-260915", "high_aes_general_v50_flash"),
+    ("doubao_seedream_5_0_flash_260915", "high_aes_general_v50_flash"),
+    ("  doubao-seedream-5-0-flash-260915  ", "high_aes_general_v50_flash"),
+])
+def test_ark_image_name_resolves_to_the_real_model(written, expect):
+    """🔴 火山方舟图片模型名（`doubao-seedream-*`）必须能**原样**当 `model` 传。
+
+    这条是 2026-10-02 用户口径"图片族也对齐方舟命名"的落点。调用方手上
+    拿到的往往就是方舟名（从方舟控制台/文档抄的），不该要求它先知道
+    即梦的面板名。
+
+    ⚠️ 判据不是"能 resolve"，而是**必须等于那个收费档的真模型**：
+    方舟名自带 `doubao-seedream` 前缀（在 `PLACEHOLDER_PREFIXES` 里），
+    一旦被当占位名吞掉，就会**静默降级成默认 Lite** ——
+    症状是"调用方点了 Flash（3 积分）、拿到 Lite（0 积分）"，
+    表现为免费，钱包没意见，但**拿到的图不是他要的模型**。
+    所以这里断言的是**具体上游 key**，不是"没报错"。
+    """
+    cap, model = resolve(written, has_image=False)
+    assert cap.api_id == "jimeng-t2i"
+    assert model == expect, f"{written!r} 落到了 {model!r}（占位降级？）"
+
+
+def test_ark_image_names_are_registered_and_wired_into_the_alias_table():
+    """`UPSTREAM_ARK_NAMES` 逐条自检：键必须是**已登记**的 key，且**已并进别名表**。
+
+    两处都会导致"方舟名看起来支持、实际走占位降级"的静默失效：
+      · 键指向未登记的 key ⇒ 别名派生出一个跑不通的上游模型；
+      · 只加进别名表、忘了加 `UPSTREAM_ARK_NAMES` ⇒ `/v1/models` 不暴露、
+        调用方无从发现（可发现性也是契约的一部分）。
+    别名表由 ARK 表**反向派生**（不是手写字面量），这条门禁保证派生关系成立。
+    """
+    from app.models import (UPSTREAM_ARK_NAMES, UPSTREAM_MODEL_ALIASES,
+                            UPSTREAM_MODEL_KEYS)
+
+    assert UPSTREAM_ARK_NAMES, "方舟名表不许为空（Flash 已在册）"
+    for upstream_key, ark_name in UPSTREAM_ARK_NAMES.items():
+        assert upstream_key in UPSTREAM_MODEL_KEYS, \
+            f"{ark_name!r} 指向未登记的 {upstream_key!r}"
+        norm = ark_name.lower()
+        assert norm in UPSTREAM_MODEL_ALIASES, \
+            f"{ark_name!r} 没并进别名表 ⇒ 会被当占位名静默降级"
+        assert UPSTREAM_MODEL_ALIASES[norm] == upstream_key, ark_name
+
+
+def test_unregistered_ark_names_stay_placeholders_instead_of_silently_upgrading():
+    """🔴 **未登记**的方舟名必须仍按**占位名**处理（落回默认 Lite），不许映射到收费档。
+
+    这是本条改动**刻意留下的分叉**，不是遗漏：`PLACEHOLDER_PREFIXES` 收
+    `doubao-seedream` 前缀，2026-10-02 之前所有方舟名都走占位。给 Flash
+    开了口子之后，如果顺手把 `doubao-seedream-5-0-pro-260628` 也映射上，
+    调用方会在**毫不知情**的情况下被切到 8 积分/张的 Pro 链路 ——
+    比降级更坏：降级只给错图，升级要扣钱。
+
+    所以这条钉住两件事：① 未登记名仍落回默认模型；② 它的落点必须是
+    **免费的默认 Lite**（若哪天默认值变了，这里会红，提醒重新评估）。
+    """
+    from app.models import DEFAULT_UPSTREAM_MODEL
+
+    for unregistered in ("doubao-seedream-5-0-pro-260628",
+                         "doubao-seedream-4-5-251128",
+                         "doubao-seedream-9-9-999999"):
+        assert is_placeholder(unregistered), unregistered
+        cap, model = resolve(unregistered, has_image=False)
+        assert cap.api_id == "jimeng-t2i"
+        assert model == DEFAULT_UPSTREAM_MODEL, \
+            f"{unregistered!r} 被映射到了 {model!r} —— 那等于替调用方换收费档"
+
+
+def test_catalog_exposes_ark_name_for_t2i_only():
+    """`upstream_models[].ark_name` = 可原样传的方舟名；**没有就给 `None`**。
+
+    🔴 未登记的档位必须给 `None` 而不是**空串** —— 空串会被调用方
+    当成"有个名字叫空"，而 `None` 才表达"这一档没有方舟对应名"。
+    """
+    from app.models import UPSTREAM_ARK_NAMES, UPSTREAM_MODEL_KEYS
+
+    t2i = [m for m in catalog() if m["id"] == "jimeng-t2i"][0]
+    got = {u["key"]: u["ark_name"] for u in t2i["upstream_models"]}
+    assert set(got) == set(UPSTREAM_MODEL_KEYS), "ark_name 没覆盖全部已登记 key"
+    for k, ark in got.items():
+        assert ark == UPSTREAM_ARK_NAMES.get(k), k
+        if ark is None:
+            assert k not in UPSTREAM_ARK_NAMES, k
+    assert got["high_aes_general_v50_flash"] == "doubao-seedream-5-0-flash-260915", \
+        "Flash 的方舟名缺失 —— 那是 2026-10-02 这次要加的东西"
+    for m in catalog():
+        if m["id"] != "jimeng-t2i":
+            assert "upstream_models" not in m, m["id"]
+
+
 def test_upstream_name_tables_do_not_drift():
     """`UPSTREAM_MODEL_KEYS` 与 `UPSTREAM_WEB_NAMES` 必须是**同一集合**。
 

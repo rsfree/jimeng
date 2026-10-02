@@ -115,18 +115,26 @@ def render(settings: Settings) -> str:
     add("")
     add("## 上游模型选项（可当 `model` 直接传）")
     add("")
-    add("文生图族接受**上游模型 key 或 web 面板名**（大小写、`-`/`_`/空格差异会被归一）：")
+    add("文生图族接受**上游模型 key / web 面板名 / 火山方舟模型名**"
+        "（大小写、`-`/`_`/空格差异会被归一）：")
     add("")
-    add("| 传给本服务 | 上游模型 | 面板名 | 单价 |")
-    add("|---|---|---|---|")
+    add("| 传给本服务 | 上游模型 | 面板名 | 方舟模型名 | 单价 |")
+    add("|---|---|---|---|---|")
     seen = False
     for it in items:
         for m in it.get("upstream_models") or []:
             seen = True
+            ark = m.get("ark_name")
             add(f"| `{m['key']}` | `{m['key']}` | {m.get('web_name') or '—'} | "
+                f"{('`' + ark + '`') if ark else '—'} | "
                 f"{_billing_of({'credits_measured': m.get('credits_measured')})} |")
     if not seen:
-        add("| — | — | — | — |")
+        add("| — | — | — | — | — |")
+    add("")
+    add("⚠️ **方舟模型名只登记了已实测过的档位**（目前 Flash）。写成 "
+        "`doubao-seedream-5-0-pro-260628` 这类**未登记**的方舟名，会被当成"
+        "第三方 SDK 的**占位名**走默认模型（Seedream 5.0 Lite，0 积分）—— "
+        "**不是**静默换成收费档。完整清单见 `GET /v1/models` 的 `ark_name` 字段。")
     add("")
     add("## 错误表（由 `app/errors.py` 的异常类派生）")
     add("")
