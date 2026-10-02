@@ -289,6 +289,40 @@ def ratio_for_size(width: int, height: int) -> int:
     return min(IMAGE_RATIOS, key=lambda k: abs(target - IMAGE_RATIOS[k][1]))
 
 
+#: 分辨率档位 → 该档的**基准边长**（像素）。
+#: 🔴 这不是"服务端声明的表"（那在 `resolution_map`，由 capabilities.py 读），
+#: 而是**从像素反推档位的判据**：服务端给的尺寸都落在这些基准附近
+#: （1k 档最长边 1024、2k 档 2048、4k 档 4096…）。
+#: 用它做**就近吸附**；拿不到能力表时也能工作（不依赖网络）。
+_RESOLUTION_BASE: tuple[tuple[str, int], ...] = (
+    ("4k", 4096), ("2k", 2048), ("1.5k", 1536), ("1k", 1024),
+)
+
+
+def resolution_type_for_size(width: int, height: int) -> str:
+    """按**最长边**就近吸附到分辨率档位（`large_image_info.resolution_type`）。
+
+    🔴 2026-10-02 修的**真 bug**：这个字段此前**硬编码 `"2k"`**（`build_draft`
+    的默认值），而 `submit()` 根本不暴露该参数 ⇒ **调用方传 `size=1024x1024`
+    也会按 2k 提交**，实测产物是 2048²、实扣 28（2k 档价）。
+    而 mj82 的服务端 `default_resolution_type` 是 **"1k"** ⇒
+    "默认口径"与"实际落点"长期不一致，且**多扣了钱**。
+
+    ✅ 实测（2026-10-02，`submit_id=d4aa1a72…`）：显式传 `resolution_type="1k"`
+    + 1024×1024 ⇒ 产物真出 1024²、实扣 **20**（= 5/张），
+    对比 2k 的 2048²/28 ⇒ **该字段确实生效**，之前是我们没传对。
+
+    ⚠️ 这是**就近吸附**，不是"精确映射"：像 2560×1440（2k 档的宽幅）
+    最长边 2560 → 吸附到 2k，正确；1000×1000 → 吸附到 1k。
+    服务端若不接受会回明确业务错误码，**不静默改写**。
+    """
+    if width <= 0 or height <= 0:
+        raise JimengParamError(f"size 非法：{width}x{height}", code=1001)
+    longest = max(width, height)
+    # 就近：取基准值与实际最长边"在数轴上最近"的那个档
+    return min(_RESOLUTION_BASE, key=lambda kv: abs(kv[1] - longest))[0]
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -395,7 +429,7 @@ def build_draft(*, prompt: str, model: str = DEFAULT_MODEL, count: int = 1,
                 width: int = 2048, height: int = 2048,
                 negative_prompt: str = "", seed: int | None = None,
                 sample_strength: float = 0.5,
-                resolution_type: str = "2k") -> str:
+                resolution_type: str | None = None) -> str:
     """构造**文生图**的 `draft_content` —— 返回的是 **JSON 字符串**（上游要双重编码）。
 
     结构完全照抄抓包，只把可变字段参数化。
@@ -404,6 +438,11 @@ def build_draft(*, prompt: str, model: str = DEFAULT_MODEL, count: int = 1,
     if not prompt or not prompt.strip():
         raise JimengParamError("prompt 不能为空（即梦文生图必填）", code=1001)
     count, _warn = resolve_count(model, count)
+    # 🔴 2026-10-02 修的真bug：此前 `resolution_type` **硬编码 "2k"**（默认值），
+    # 而 `size` 只落到 `width/height` ⇒ 调用方传 1024×1024 也按 2k 提交，
+    # 产物真出 2048²、**按 2k 档多扣钱**。现改为**按 size 就近吸附**，
+    # 显式传值时以传入的为准。
+    rtype = resolution_type or resolution_type_for_size(width, height)
 
     comp_id = _uid()
     draft = {
@@ -441,7 +480,7 @@ def build_draft(*, prompt: str, model: str = DEFAULT_MODEL, count: int = 1,
                         "large_image_info": {
                             "type": "", "id": _uid(),
                             "height": height, "width": width,
-                            "resolution_type": resolution_type,
+                            "resolution_type": rtype,
                         },
                         "intelligent_ratio": False,
                         "generate_type": 0,
@@ -789,7 +828,8 @@ def build_blend_draft(*, prompt: str, image_uris: Sequence[str] | None = None,
                       image_uri: str = "", image_url: str = "",
                       source_from: str = "upload", model: str = DEFAULT_MODEL,
                       strength: float = 0.5, width: int = 2048, height: int = 2048,
-                      resolution_type: str = "2k", count: int = 1) -> str:
+                      resolution_type: str | None = None,
+                      count: int = 1) -> str:
     """构造**图生图（blend）**的 `draft_content`（JSON 字符串）。
 
     `source_from`：`upload` = 即梦存储里的 `image_uri`（**样本实测形态**）；
@@ -808,6 +848,9 @@ def build_blend_draft(*, prompt: str, image_uris: Sequence[str] | None = None,
     uris = [u for u in (image_uris or ()) if u]
     if not uris and image_uri:
         uris = [image_uri]
+    # 🔴 2026-10-02：与 t2i 同一个 bug —— 原本硬编码 2k，`size` 只落width/height
+    # ⇒ 传 1024×1024 也按 2k 跑（实测 mj82 blend 传 1024² 出来2048²、扣 28）。
+    rtype = resolution_type or resolution_type_for_size(width, height)
 
     if not prompt or not prompt.strip():
         raise JimengParamError("blend 需要 prompt（描述要怎么改）", code=1001)
@@ -843,7 +886,7 @@ def build_blend_draft(*, prompt: str, image_uris: Sequence[str] | None = None,
                         "image_ratio": ratio_for_size(width, height),
                         "large_image_info": {"type": "", "id": _uid(),
                                              "height": height, "width": width,
-                                             "resolution_type": resolution_type},
+                                             "resolution_type": rtype},
                     },
                     "ability_list": [{
                         "type": "", "id": _uid(), "name": BLEND_ABILITY_NAME,

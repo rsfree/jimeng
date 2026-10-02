@@ -381,6 +381,60 @@ def test_i2i_accepts_upstream_model_and_t2i_does_not_swallow_it():
     assert (cap2.api_id, model2) == ("jimeng-t2i", MJ)
 
 
+def test_resolution_type_follows_size_instead_of_hardcoded_2k():
+    """🔴 `resolution_type` 必须**跟随 size**，不能硬编码 2k。
+
+    2026-10-02 修的真 bug：`build_draft(resolution_type="2k")` 写死，
+    而 `submit()` 不暴露该参数 ⇒ **调用方传 `size=1024x1024` 也按 2k 提交**，
+    实测产物是 2048²、实扣 28（2k 档价）—— 静默多扣钱。
+    而 mj82 的服务端 `default_resolution_type` 是 **"1k"** ⇒
+    "默认口径"与"实际落点"长期不一致。
+
+    ✅ 实测证据（`submit_id=d4aa1a72…`）：显式 `resolution_type="1k"` +
+    1024×1024 ⇒ 产物真出 1024²、实扣 **20**（5/张）⇒ 该字段确实生效。
+
+    判据分两层：① 吸附函数按最长边映射正确；② t2i 与 blend **两条路径都**用它
+    （blend 曾是同一个 bug 的第二处现场，只修 t2i 会留一半坑）。
+    """
+    import json as _json
+    from app.upstream.jimeng.client import (build_draft, build_blend_draft,
+                                            resolution_type_for_size)
+
+    # ① 吸附：按最长边就近取档
+    for w, h, exp in ((1024, 1024, "1k"), (2048, 2048, "2k"),
+                      (4096, 4096, "4k"), (768, 1024, "1k"),
+                      (2560, 1440, "2k"), (1728, 2304, "2k"),
+                      (1536, 1536, "1.5k")):
+        assert resolution_type_for_size(w, h) == exp, f"{w}x{h}"
+
+    # ② t2i：size 决定档位，不再一律 2k
+    for w, h, exp in ((1024, 1024, "1k"), (2048, 2048, "2k")):
+        d = _json.loads(build_draft(prompt="p", count=4, width=w, height=h))
+        lii = (d["component_list"][0]["abilities"]["generate"]["core_param"]
+               ["large_image_info"])
+        assert lii["resolution_type"] == exp, \
+            f"t2i {w}x{h} 档位应为 {exp}，实得 {lii['resolution_type']}"
+    # 显式传值仍优先
+    d = _json.loads(build_draft(prompt="p", count=4, width=1024, height=1024,
+                                resolution_type="2k"))
+    assert d["component_list"][0]["abilities"]["generate"]["core_param"][
+        "large_image_info"]["resolution_type"] == "2k", "显式覆盖必须优先"
+
+    # ③ blend：同一个 bug 的第二处现场，必须一起修
+    d = _json.loads(build_blend_draft(prompt="p", image_uri="tos-cn-i-x/y",
+                                      width=1024, height=1024, count=4))
+    lii = d["component_list"][0]["abilities"]["blend"]["core_param"][
+        "large_image_info"]
+    assert lii["resolution_type"] == "1k", \
+        f"blend 同样必须跟随 size，实得 {lii['resolution_type']}（只修 t2i 会留坑）"
+
+    # ④ 真跑凭据必须留在文档里
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "docs" / "UPSTREAM.md"
+            ).read_text(encoding="utf-8")
+    assert "d4aa1a72" in text, "1k 档真跑的 submit_id 证据丢失了"
+
+
 def test_mj82_blend_was_proven_end_to_end_not_just_wired():
     """🔴 mj82 走 blend（图生图）**已端到端真跑** —— 不只是"代码路径通"。
 

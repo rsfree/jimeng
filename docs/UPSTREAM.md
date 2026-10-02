@@ -663,22 +663,52 @@ python scripts/dump_video_models.py --all --raw /tmp/cfg.json
 原样透传 2/3 然后被上游静默改写成 4 ⇒ 我们报 n=3、实际出 4 张、按 4 张计费。
 要 n 张就只传 n，其余靠 `service.create` 的 `len(declared)==1` 留痕告知。
 
-### 17.3 计费：出图数决定，不是 5/张固定
+### 17.3 计费：**分辨率 × 张数**（已解，2026-10-02）
 消耗记录按 `submit_id` 对账：
-| 出图 | 实扣 | 每张 |
-|---|---|---|
-| 1 张 | **7** | 7 |
-| 4 张（1k） | **20** | 5 |
-| 4 张（2k） | **28** | 7 |
-🔴 单价**不是常数**（1k 5/张、2k 7/张），且 1 张也要 7（不是 5）
-⇒ 计价大概率按"档位最低消费"或分辨率×张数组合，**规则未解**。
-`UPSTREAM_MODEL_CREDITS` 里暂填 **5**（1k 四张口径）并在此标注不确定。
-提交包 `amount=1` 是**档位标记**（`image_basic_mj82_fast_1k`），不是单价。
-2k 档 `image_basic_mj82_fast_2khd`。
 
-### 17.4 分辨率
-`resolution_map`：1k（1024²/768×1024/1024×576…）与 2k（2048²/1728×2304…），
-`default_resolution_type="1k"`。
+| 分辨率档 | 张数 | 实扣 | 每张 |
+|---|---|---|---|
+| 1k | 4 | **20** | **5** |
+| 2k | 4 | **28** | **7** |
+| 1k | 1 | **7** | 7 |
+
+⇒ 规则 = **每张单价随分辨率档走**（1k 5、2k 7），
+而**张数下限是7**（只出 1 张也按7 扣，不是 5）
+⇒ 单张时"1k 的 5/张"用不上，实际付7。
+🔴 对账时**别用"张数 × 单价"线性估算**，1 张那档就是反例。
+
+### 17.4 🔴 分辨率：服务端默认 **1k**，我们此前**恒发 2k**（真 bug，已修）
+
+服务端 `default_resolution_type`（2026-10-02 实读）：
+
+| 模型 | default | 可用档位 |
+|---|---|---|
+| **mj82** | **1k** | 1k / 2k |
+| Seedream 5.0 Flash | 2k | 1.5k / 2k |
+| Seedream 5.0 Pro | 2k | 1.5k / 2k / 4k |
+| Seedream 5.0 Lite / 4.x | None | 2k / 4k |
+
+⚠️ Lite / 4.x 的 `default` 是 `None`（**读不到 ≠ 没有默认**），
+不能据此断言它们"没有默认档"。
+
+mj82 的 `resolution_map`：1k 有 7 个比例（1024²/768×1024/1024×576…）、
+2k 同 7 个（2048²/1728×2304/2560×1440…）。
+
+#### 🔴 我们代码的 bug：`resolution_type` 硬编码 `"2k"`
+`build_draft` / `build_blend_draft` 的该参数默认值是 `"2k"`，
+而 `submit()` / `blend()` **根本不暴露它** ⇒
+**调用方传 `size=1024x1024` 也按 2k 提交**。
+症状：草稿里 `large_image_info` 是 `1024x1024 / resolution_type='2k'`
+（**两个字段自相矛盾**），产物真出 **2048²**、按 2k 档**多扣钱**。
+
+✅ **实测证据**（`submit_id=d4aa1a72-e709-491a-b6ed-281e433f04f8`）：
+显式 `resolution_type="1k"` + 1024×1024 ⇒ 产物真出 **1024²**、实扣 **20**（5/张）
+⇒ 该字段**确实生效**，此前是我们没传对。
+
+✅ **已修**：`resolution_type` 改为**按 size 最长边就近吸附**
+（`resolution_type_for_size`），显式传值时以传入的为准。
+t2i 与 blend **两条路径一起修**（blend 是同一 bug 的第二处现场）。
+门禁 `test_resolution_type_follows_size_instead_of_hardcoded_2k`。
 
 ### 17.5 ✅ 支持图生图（byte_edit）—— **已端到端真跑**
 `feats` 含 `t2i` + `byte_edit` + `simple_image` + `per_piece` + `refuse_image`；
