@@ -227,7 +227,17 @@ UPSTREAM_MODEL_CREDITS: dict[str, int | None] = {
     # 2026-10-02 实测：4 张实扣 **20**（=5/张）；提交包预扣 amount=1 只是档位标记
     "jm_image_model_yc_mj82": 5,
     "high_aes_general_v50_flash": 3,      # 2026-09-23 实跑（2k/1 张，三证吻合）
-    "high_aes_general_v50": 0,            # 2026-09-20 实测免费（Lite）
+    # 🔴 2026-10-02 更正：Lite **不是"免费"**，是**按分辨率档**收的：
+    # · **2k 实测 0**（2026-09-20 余额差分 + 消耗记录，长期未变）；
+    # · **4k 实测 4/张**（`submit_id=07144215…`，余额 5526→5522 +
+    #   消耗记录 `图片生成 amount=4` 两证吻合）。
+    # 服务端也这么声明：`blend` 段有**两条独立计费项**
+    # （2k = `image_basic_v5_2k` / 4k = `image_basic_v5_4k`，各 amount=1）。
+    # ⚠️ **这里只登记 2k 口径**（默认档、最常用、也是"免费"口碑的来源），
+    # `credits_measured` 是**单值**字段、表达不了"按档定价"——
+    # 调用方若拿它当"这个模型恒免费"就会在 4k 上踩坑。
+    # 4k 的真实单价见 docs/UPSTREAM.md 与 `service.create` 的分档留痕。
+    "high_aes_general_v50": 0,
     "high_aes_general_v50p_large": 8,     # 2026-09-20 实测（三尺寸同价）
     "high_aes_general_v43": None,
     "high_aes_general_v42": None,
@@ -307,6 +317,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         accepts_image=False, image_required=False, prompt_required=True,
         credits_measured=0,
         notes="上游模型 high_aes_general_v50（Seedream 5.0 Lite）；异步建任务→轮询，"
+              "⚠️ **能力级的 0 只对 2k 档成立**（4k 是独立计费项 image_basic_v5_4k，"
+              "**实测 4/张**，submit_id 07144215）⇒ 传 4k 尺寸会在 degradations "
+              "里留痕提示额外扣费；"
               "**建任务即计费**。"
               "实测一次出图端到端 17.9-19s（1 张 2048×2048）。"
               "本能力也接受**直接写上游模型 key 或 web 面板名**来换模型，"

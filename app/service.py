@@ -715,6 +715,27 @@ class Service:
             except JimengError as e:
                 raise InvalidParameterError(str(e), param="size") from e
 
+            from .upstream.jimeng.client import (  # noqa: PLC0415
+                resolution_type_for_size)
+
+            # 🔴 2026-10-02（用户纠正"lite 4k 并不免费"触发）：
+            # **分辨率档会改计费**，而受理层此前对 `size` **零留痕** ——
+            # 调用方传 4k 会被静默按 4k 档扣钱。
+            # 已实测 Lite（Seedream 5.0）：2k **0** / 4k **4**（`submit_id=07144215…`）
+            # ⇒ "Lite 免费"只对 **2k** 成立，别把它当恒免费。
+            # 只在**跨过已知收费档**时留痕（默认 2k 什么都不说，避免噪音）。
+            try:
+                _w, _h = parse_size(str(size))
+                _rtype = resolution_type_for_size(_w, _h)
+            except Exception:            # noqa: BLE001 —— 已在上面校验过，这里只兜住意外
+                _rtype = None
+            if _rtype == "4k":
+                degradations.append(
+                    f"size={size} 落在**4k 档**（比默认的 2k 档贵）："
+                    f"该档是**独立计费项**（如 Lite 的 "
+                    f"image_basic_v5_4k），会按张数额外扣积分"
+                    f"（实测 4/张）。要免费档请显式传 2k 尺寸（如 2048x2048）。")
+
         #: ⚠️ **不传 `n` 与传 `n=...` 是两种情况，必须分开处理。**
         #:
         #: 🔴 契约：**不传 `n` ⇒ 取该模型的最小合法值**（通常就是 1），

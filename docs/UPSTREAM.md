@@ -782,3 +782,41 @@ t2i 与 blend **两条路径一起修**（blend 是同一 bug 的第二处现场
 理由：降级只给**错图**，升级到收费档才**扣钱**；而本节门禁钉的是
 "**不静默升级**"，**不是**"必须报错"。
 ⚠️ 看到"未知模型名不报错"而想去收紧的，请先看这段 —— 那会推翻用户拍板的口径。
+
+## 19. 🔴 分辨率档**改计费** —— "Lite 免费"只对 2k 成立
+
+2026-10-02 用户纠正"**lite 4k 并不免费**"，实测坐实。
+
+### 证据
+**✅ 实跑**（`submit_id=07144215-e9b2-4cc4-9381-23adc6249d26`）：
+Lite + `size=4096x4096`（⇒ 4k 档）⇒ 终态 `status=50`、产物 **4096²**、
+用时 26s、**实扣 4 积分**（余额 5526→5522 + 消耗记录
+`图片生成 amount=4` 两证吻合）。
+对比 Lite 2k 长期实扣 **0**（2026-09-20 起余额差分从未变化）。
+
+### 服务端也这么声明
+`commercial_config.image_model_commerce_config.blend` 段里
+**4k 是与 2k 并列的独立计费项**（各 `amount=1`）：
+
+| 模型 | 2k 计费项 | 4k 计费项 |
+|---|---|---|
+| Seedream 5.0 **Lite** | `image_basic_v5_2k` | **`image_basic_v5_4k`** |
+| Seedream 4.7 / 4.6 | `image_basic_v46_2k` | `image_basic_v46_4k` |
+| Seedream 4.1 | `image_basic_v41_2k` | `image_basic_v41_4k` |
+| Seedream 4.0 | `image_blend_piece` | `image_uhd_4k` |
+| Seedream 5.0 Pro | `image_basic_v50_pro_2k` | `image_basic_v50_pro_4k` |
+| 图片美学 V8.2 | `image_basic_mj82_fast_1k` / `_2khd` | —（只有 1k/2k） |
+
+⚠️ Lite 之外，**4.x 族同样是"2k 免费、4k 收费"**（未实测，但计费项独立）。
+⇒ "免费"这个口碑**全部只对 2k 成立**。
+
+### 🔴 结构性问题：单值字段表达不了"按档定价"
+`UPSTREAM_MODEL_CREDITS` / `Capability.credits_measured` 都是**单值**，
+登记的 `0` 天然只对 2k 成立 —— 但**极易被读成"这个模型恒免费"**。
+⇒ 除登记口径（注释里写明）外，**受理层必须留痕**：
+`service.create` 现在对 **4k 尺寸**会在 `degradations` 里明确告知
+"落在 4k 档、比默认 2k 贵、实测 4/张、要免费档请传 2k 尺寸"。
+**2k 不留痕**（默认档，避免噪音）。
+门禁 `test_lite_is_free_at_2k_but_charged_at_4k` +
+`test_4k_size_is_reported_as_charged_tier`。
+

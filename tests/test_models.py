@@ -751,3 +751,46 @@ def test_fallback_note_does_not_leak_across_calls():
     resolve("seedream-9-9-ultra", has_image=False)
     resolve("Seedream 5.0 Flash", has_image=False)
     assert take_fallback_note() is None, "认得的名字必须清掉上一轮兜底记录"
+
+
+def test_lite_is_free_at_2k_but_charged_at_4k():
+    """🔴 **Lite 不是"免费"** —— 只有 2k 免费，**4k 实测 4/张**。
+
+    2026-10-02 用户纠正"lite 4k 并不免费"，实测坐实：
+    · **2k** = 0（2026-09-20 起余额差分 + 消耗记录长期未变）；
+    · **4k** = **4/张**（`submit_id=07144215…`，余额 5526→5522 +
+      消耗记录 `图片生成 amount=4` 两证吻合）。
+    服务端也这么声明：`blend` 段有**两条独立计费项**
+    （2k=`image_basic_v5_2k` / 4k=`image_basic_v5_4k`，各 amount=1）。
+
+    🔴 为什么这条必须存在：`credits_measured` 是**单值**字段，
+    表达不了"按档定价" ⇒ 登记的 0 天然只对 2k 成立。
+    人（和调用方）极易把 0 读成"这个模型恒免费"⇒ 传 4k 时被静默扣钱。
+    所以除了登记口径，还必须**在受理层留痕**（下一条门禁）。
+    """
+    from app.models import UPSTREAM_MODEL_CREDITS
+
+    assert UPSTREAM_MODEL_CREDITS["high_aes_general_v50"] == 0, \
+        "登记表填的仍是 2k 口径（0）；若默认值变了请同步实测"
+    # 真跑凭据
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "docs" / "UPSTREAM.md"
+            ).read_text(encoding="utf-8")
+    assert "07144215" in text, "Lite 4k 实扣 4 的submit_id 证据丢失了"
+
+
+def test_4k_size_is_reported_as_charged_tier():
+    """🔴 请求 **4k 尺寸**必须在 `degradations` 里**响亮告知额外扣费**。
+
+    受理层此前对 `size` **零留痕** ⇒ 传 4k 会被静默按 4k 档扣钱。
+    这条钉住"跨收费档必须留痕"，且**只对 4k 说**（默认 2k 不制造噪音）。
+    """
+    import inspect
+    from app.service import Service
+
+    src = inspect.getsource(Service.create)
+    assert 'if _rtype == "4k":' in src, \
+        "4k 是独立计费档，必须有专门留痕分支"
+    assert "image_basic_v5_4k" in src, \
+        "留痕文案要指名真实计费项，让调用方能自己去上游对账"
+    assert "degradations.append" in src, "留痕必须进 degradations（会被回给调用方）"
