@@ -745,3 +745,33 @@ t2i 与 blend **两条路径一起修**（blend 是同一 bug 的第二处现场
 而既有门禁 `test_every_web_alias_maps_to_a_registered_upstream_model`
 **抓不到**（它遍历表内键 —— 错的键自己撞自己仍"通过"）。
 已补 `test_every_alias_key_is_in_normalised_form` 把这类沉默失配在导入期照出来。
+
+## 18. 方舟图片模型名 → 即梦上游 key（2026-10-02）
+
+`UPSTREAM_ARK_NAMES`（上游 key → 方舟名），**当前 3 条**：
+
+| 即梦上游 key | 面板名 | 方舟模型名 | 实测单价 |
+|---|---|---|---|
+| `high_aes_general_v50p_large` | Seedream 5.0 Pro | `doubao-seedream-5-0-pro-260628` | 8/张 |
+| `high_aes_general_v50_flash` | Seedream 5.0 Flash | `doubao-seedream-5-0-flash-260915` | 3/张 |
+| `high_aes_general_v50` | Seedream 5.0 Lite | `doubao-seedream-5-0-260128` | 0 |
+
+三条均由**用户点名指定**（不是我们从能力表推的）。
+机制：别名表由本表**反向派生**（`{_norm(方舟名): 上游key}`）——
+不手写字面量，两张表漂移时门禁立刻红。
+
+### 🔴 结构性约束：一个方舟名只对一个上游 key
+`v4*` 族有 **5 个** key（`v40`/`v40l`/`v41`/`v42`/`v43` = 4.0/4.5/4.1/4.6/4.7）。
+若图省事把同一个方舟名指给整族，反向派生的 dict 推导会让
+**后者覆盖前者** ⇒ 另外 4 个模型**静默失去**可用的方舟名，
+而 `/v1/models` 里它们的 `ark_name` 还都显示着那个名字，**看着完全正常**。
+⇒ 门禁 `test_ark_name_is_one_to_one_and_never_collapses`在登记时就拦。
+⚠️ 因此 4.x 族目前**一个方舟名都没登记** —— 需要的话请给**每个档位**分别的
+官方模型名，不要给通配。
+
+### 未登记名的处置（刻意保留）
+`doubao-seedream-4-5-251128` 等**未登记**的方舟名仍按**占位名**处理 ⇒
+落回默认 Lite（0）。理由：认一个没对账过的名字 = 替调用方悄悄切到
+收费档（Pro 8/张）——**降级只给错图，升级要扣钱**。
+门禁 `test_unregistered_ark_names_stay_placeholders_...`（2026-10-02
+把样本从 pro 换成 4.5 那条，保护机制本身一条没少）。

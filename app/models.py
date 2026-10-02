@@ -100,15 +100,23 @@ def _norm_model_name(raw: str) -> str:
 #:
 #: 🔴 **只登记调用方点名要的那几个**，不做前缀通配：
 #: 方舟图片模型名形如 `doubao-seedream-<版本>-<档位>-<日期>`，而即梦侧只有
-#: **已实测过**的档位能跑（见 `UPSTREAM_MODEL_KEYS`）。未登记的方舟名
-#: （如 `doubao-seedream-5-0-pro-260628`）仍按**占位名**处理 —— 那是
-#: "刻意不认"，不是漏认：认了它就等于替调用方悄悄换到 8 积分/张的 Pro 链路。
+#: **已实测过**的档位能跑（见 `UPSTREAM_MODEL_KEYS`）。**没登记的**方舟名
+#: 仍按**占位名**处理（走默认 Lite）—— 那是"刻意不认"，不是漏认：
+#: 认一个没对账过的名字 = 替调用方悄悄切到另一条计费链路（Pro 是 8 积分/张）。
 #: 缺哪个档位要显式加进本表，并在 `UPSTREAM_MODEL_CREDITS` 补实测价。
 #:
-#: 门禁：`tests/test_models.py::test_ark_image_names_resolve_to_registered_models`
-#: 逐条断言"键集合 ⊆ 已登记 key"+"逐条能 resolve"。
+#: 2026-10-02 用户点名补登Pro 与 Lite 两条（此前只有 Flash）：
+#: ⚠️ `doubao-seedream-5-0-pro-260628` 此前是"**刻意不认**"的反例
+#: （见 `test_unregistered_ark_names_stay_placeholders_...` 的原注释）——
+#: 现在由用户明确指定为 `high_aes_general_v50p_large` 的方舟名，
+#: 该门禁的样本已相应换成**仍未登记**的其它名字（保护机制本身保留）。
+#:
+#: 门禁：`tests/test_models.py::test_ark_image_names_are_registered_and_wired_...`
+#: 逐条断言"键集合 ⊆ 已登记 key"+"逐条能 resolve"+"已并进别名表"。
 UPSTREAM_ARK_NAMES: dict[str, str] = {
+    "high_aes_general_v50p_large": "doubao-seedream-5-0-pro-260628",
     "high_aes_general_v50_flash": "doubao-seedream-5-0-flash-260915",
+    "high_aes_general_v50": "doubao-seedream-5-0-260128",
 }
 
 

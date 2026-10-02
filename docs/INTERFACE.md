@@ -451,12 +451,19 @@ Authorization: Bearer <key>
 3. **`Seedream 3.0` / `3.1` 明确拒绝**（400，报错里给出上游 key 与理由：
    该系列实测 `ret=1006` 权益不足）—— 面板上点得到、本服务没登记时**不许静默退化**
    成默认模型。
-4. **第三方 SDK 的 `doubao-seedream-5-0-pro-260628` 仍按占位名处理**（等价于没写
-   `model` ⇒ 默认 Lite）。**刻意不映射到 Pro**：那等于替调用方悄悄换到收费链路。
-5. **`doubao-seedream-5-0-flash-260915`（方舟图片模型名）可原样传** ⇒ 命中
-   `high_aes_general_v50_flash`（2026-10-02 起）。它自带 `doubao-seedream` 前缀，
-   靠"别名判在占位判之前"这条从占位里救回来 —— **已登记**的方舟名走真模型，
-   **未登记**的仍落回默认 Lite（见第 4 条，两者刻意分叉）。
+4. **已登记的方舟图片模型名可原样传**（2026-10-02，共 3 条）——
+   `doubao-seedream-5-0-flash-260915` → Flash（3）、
+   `doubao-seedream-5-0-pro-260628` → Pro（8）、
+   `doubao-seedream-5-0-260128` → Lite（0）。
+   它们自带 `doubao-seedream` 前缀（在 `PLACEHOLDER_PREFIXES` 里），
+   靠"别名判在占位判之前"这条从占位里救回来。
+   ⚠️ **未登记**的方舟名（如 `doubao-seedream-4-5-251128`）仍落回默认 Lite ——
+   **刻意不映射**：认一个没对账过的名字 = 替调用方悄悄切到另一条计费链路
+   （Pro 是 8 积分/张），"降级只给错图、升级要扣钱"。
+5. 🔴 **方舟名必须一模型一名，不许通配**。`v4*` 族有 **5 个** key
+   （4.0/4.1/4.5/4.6/4.7），若把同一个方舟名指给整族，别名表反向派生时
+   **后者覆盖前者、静默丢掉 4 个模型** —— 而 `/v1/models` 里两条还都显示着它，
+   看着完全正常。门禁 `test_ark_name_is_one_to_one_and_never_collapses`。
 
 `GET /v1/models` 的 **`jimeng-t2i`** 条目里带 `upstream_models`，
 逐项给出 `{key, web_name, ark_name, credits_measured}` —— 调用方不必去别处对照名字。

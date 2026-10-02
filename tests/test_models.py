@@ -73,15 +73,17 @@ def test_unknown_model_is_rejected_with_hint():
 
 @pytest.mark.parametrize("placeholder", ["", "auto", "default", "dall-e-3",
                                          "gpt-image-1",
-                                         "doubao-seedream-5-0-pro-260628"])
+                                         "doubao-seedream-4-5-251128"])
 def test_placeholders_count_as_unspecified(placeholder):
     """第三方 SDK 硬编码的占位名**不代表调用意图** ⇒ 走默认推导而不是报"未知模型"。
 
     ⚠️ `seedream-4-0` **已从这里移出**：它同时是即梦 web 面板上的正式模型名
     （Seedream 4.0），2026-09-23 起登记为**精确别名**。
-    带厂商前缀 + 日期后缀的 `doubao-seedream-5-0-pro-260628` 仍算占位 ——
-    它命不中别名，而且**绝不能**被映射到 Pro（那等于替调用方悄悄换到
-    8 积分/张的链路）。
+    带厂商前缀 + 日期后缀但**未登记**的 `doubao-seedream-4-5-251128` 仍算占位。
+
+    🔴 2026-10-02：样本原为 `doubao-seedream-5-0-pro-260628`，现已由用户
+    **明确指定**为 `high_aes_general_v50p_large`（Pro）的方舟名 ⇒ 它不再是占位名。
+    换成4.5 那条**仍未登记**的名字，保护机制本身一条不少。
     """
     from app.models import DEFAULT_UPSTREAM_MODEL
 
@@ -151,6 +153,14 @@ def test_unregistered_web_models_are_rejected_with_a_reason():
     ("Doubao-Seedream-5-0-Flash-260915", "high_aes_general_v50_flash"),
     ("doubao_seedream_5_0_flash_260915", "high_aes_general_v50_flash"),
     ("  doubao-seedream-5-0-flash-260915  ", "high_aes_general_v50_flash"),
+    # 🔴 2026-10-02 用户点名补登 Pro / Lite 两条方舟名。
+    # 判据是**必须等于那个档位的真模型** —— Pro 是 8 积分/张，落到Lite 就是
+    # 静默降级（表现为免费、钱包没意见，但拿到的图不是要的那个模型）。
+    ("doubao-seedream-5-0-pro-260628", "high_aes_general_v50p_large"),
+    ("Doubao-Seedream-5-0-Pro-260628", "high_aes_general_v50p_large"),
+    ("doubao-seedream-5-0-260128", "high_aes_general_v50"),
+    ("Doubao-Seedream-5-0-260128", "high_aes_general_v50"),
+    ("doubao_seedream_5_0_260128", "high_aes_general_v50"),
 ])
 def test_ark_image_name_resolves_to_the_real_model(written, expect):
     """🔴 火山方舟图片模型名（`doubao-seedream-*`）必须能**原样**当 `model` 传。
@@ -197,24 +207,53 @@ def test_unregistered_ark_names_stay_placeholders_instead_of_silently_upgrading(
     """🔴 **未登记**的方舟名必须仍按**占位名**处理（落回默认 Lite），不许映射到收费档。
 
     这是本条改动**刻意留下的分叉**，不是遗漏：`PLACEHOLDER_PREFIXES` 收
-    `doubao-seedream` 前缀，2026-10-02 之前所有方舟名都走占位。给 Flash
-    开了口子之后，如果顺手把 `doubao-seedream-5-0-pro-260628` 也映射上，
-    调用方会在**毫不知情**的情况下被切到 8 积分/张的 Pro 链路 ——
+    `doubao-seedream` 前缀，早期所有方舟名都走占位。给Flash / Pro / Lite
+    开了口子之后，如果顺手把**别的**方舟名也映射上（比如把 4.5 的名字
+    指向 Pro），调用方会在**毫不知情**的情况下被切到 8 积分/张的 Pro 链路 ——
     比降级更坏：降级只给错图，升级要扣钱。
 
     所以这条钉住两件事：① 未登记名仍落回默认模型；② 它的落点必须是
     **免费的默认 Lite**（若哪天默认值变了，这里会红，提醒重新评估）。
+
+    🔴 2026-10-02：`doubao-seedream-5-0-pro-260628` 已由用户**明确指定**为
+    Pro 的方舟名 ⇒ 移出样本。**保护机制本身一条没少**，只是换了样本。
     """
     from app.models import DEFAULT_UPSTREAM_MODEL
 
-    for unregistered in ("doubao-seedream-5-0-pro-260628",
-                         "doubao-seedream-4-5-251128",
-                         "doubao-seedream-9-9-999999"):
+    for unregistered in ("doubao-seedream-4-5-251128",
+                         "doubao-seedream-9-9-999999",
+                         "doubao-seedream-5-5-pro-260101"):
         assert is_placeholder(unregistered), unregistered
         cap, model = resolve(unregistered, has_image=False)
         assert cap.api_id == "jimeng-t2i"
         assert model == DEFAULT_UPSTREAM_MODEL, \
             f"{unregistered!r} 被映射到了 {model!r} —— 那等于替调用方换收费档"
+
+
+def test_ark_name_is_one_to_one_and_never_collapses():
+    """🔴 `UPSTREAM_ARK_NAMES` 必须**一个方舟名只对一个上游 key**。
+
+    为什么这条是结构性的：别名表由本表**反向派生**
+    （`{_norm(ark_name): key}`）⇒ 若两个 key 写同一个方舟名，
+    dict 推导会让**后者覆盖前者**，**静默丢掉**其中一个模型 ——
+    而`/v1/models` 里两个条目还都显示着这个方舟名，看着完全正常。
+
+    真实风险场景：`v4*` 族有 **5 个** key（4.0/4.1/4.5/4.6/4.7），
+    若图省事把同一个方舟名指给整族，反向派生后只剩 1 个，
+    另外 4 个模型的方舟名**从此静默查不中**。
+    ⇒ 这条门禁在登记时就拦住"想用通配名"的写法。
+    """
+    from app.models import UPSTREAM_ARK_NAMES
+
+    seen: dict[str, str] = {}
+    for upstream_key, ark_name in UPSTREAM_ARK_NAMES.items():
+        assert ark_name not in seen, (
+            f"方舟名 {ark_name!r} 被指给了两个上游 key："
+            f"{seen[ark_name]!r} 与 {upstream_key!r} —— "
+            f"反向派生别名表时会**静默丢掉**其中一个，"
+            f"而 /v1/models 里两条都还显示着它。"
+            f"方舟名必须**一模型一名**，别用通配。")
+        seen[ark_name] = upstream_key
 
 
 def test_catalog_exposes_ark_name_for_t2i_only():
@@ -232,8 +271,13 @@ def test_catalog_exposes_ark_name_for_t2i_only():
         assert ark == UPSTREAM_ARK_NAMES.get(k), k
         if ark is None:
             assert k not in UPSTREAM_ARK_NAMES, k
+    # 2026-10-02 用户点名补登：Flash / Pro / Lite 三条都要在
     assert got["high_aes_general_v50_flash"] == "doubao-seedream-5-0-flash-260915", \
-        "Flash 的方舟名缺失 —— 那是 2026-10-02 这次要加的东西"
+        "Flash 的方舟名缺失"
+    assert got["high_aes_general_v50p_large"] == "doubao-seedream-5-0-pro-260628", \
+        "Pro 的方舟名缺失（用户 2026-10-02 明确指定）"
+    assert got["high_aes_general_v50"] == "doubao-seedream-5-0-260128", \
+        "Lite 的方舟名缺失（用户 2026-10-02 明确指定）"
     for m in catalog():
         if m["id"] != "jimeng-t2i":
             assert "upstream_models" not in m, m["id"]
