@@ -333,6 +333,31 @@ class Service:
                 and self.uploader is not None:
             self.vod = VodUploader(self.client, imagex=self.uploader)
 
+    # ------------------------------------------------------------------ 能力表
+
+    def refresh_blend_capability(self) -> int:
+        """从**服务端能力表**回填"哪些上游模型支持 blend（图生图）"。
+
+        数据源 = `get_common_config` 的 `feats`（含 `byte_edit`），**只读零成本**。
+        🔴 为什么必须读服务端而不能写死：`feats` 是上游的权威声明，
+        而"表里没有"有两种可能—— 真不支持，或我们没读到。
+        两种都按"不支持"处理（保守拒绝）并让报错说清替代路径：
+        **猜一个 blend 能不能用，代价是建任务后才炸**。
+        返回回填的条目数（0 = 没读到能力表，此时全部按不支持处理）。
+        """
+        if self.cfg is None:
+            models.set_blend_capable({})
+            return 0
+        snap = self.cfg.snapshot()
+        if snap is None:
+            models.set_blend_capable({})
+            return 0
+        models.set_blend_capable({
+            key: bool(spec.feats and "byte_edit" in spec.feats)
+            for key, spec in snap.specs.items()
+        })
+        return len(snap.specs)
+
     # ------------------------------------------------------------------ 生命周期
 
     def close(self) -> None:
@@ -462,6 +487,16 @@ class Service:
                 eff_model = "jimeng-detail-fix"   # 图片端点：引用既有作品修复
         cap, upstream_model = models.resolve(eff_model, has_image=bool(image),
                                             n_images=len(image), video=video)
+        #: 🔴 **占位名兜底的留痕**（2026-10-02）。调用方显式写了一个我们没登记的
+        #: 型号（`seedream-9-9-ultra` / `doubao-seedream-5-0-pro-260628` …），
+        #: 按占位处理 ⇒ 兜底到默认档出图。**兜底本身是允许的**（免费档，不掏钱），
+        #: 但**不能静默** —— 否则调用方拿到的是它没点的模型却毫无察觉。
+        #: 现象（本服务 v0.1.9 实测）：`seedream-9-9-ultra` 返回 200 且出图成功
+        #: （submit_id 9154eaa2），响应体里 `degradations` 为**空**。
+        #: `take_fallback_note()` 取走即清 ⇒ 同一请求里不会重复写。
+        if (note := models.take_fallback_note()) is not None:
+            degradations.append(note)
+
         if cap.prompt_required and not prompt:
             raise InvalidParameterError(
                 f"model {cap.api_id}（{cap.title}）需要 prompt，但本次没给或为空。",
@@ -717,8 +752,11 @@ class Service:
             # 早先只放行 t2i（后来才加上 i2i），后编辑族则写着"只接受 1" ——
             # 而那句"扩图固定出 4 张"其实是**我们没传张数、上游用了默认值**。
             # 同一个坑（把"我们没传"误读成"上游不支持"）已经踩过两次，别再犯。
-            model_key = (upstream_model or DEFAULT_MODEL) if cap.name == "t2i" \
-                else DEFAULT_MODEL
+            # 🔴 2026-10-02：`model_key` 的取值范围从"只有 t2i"扩到
+            # **"任何解析出了上游模型的能力"**（目前 t2i + i2i）。原先 i2i
+            # 恒用 DEFAULT_MODEL，导致换模型只对文生图生效。
+            # 张数选项**逐模型**查（不同模型声明不同：Lite 1..8 /mj82 只有 [4]）。
+            model_key = upstream_model or DEFAULT_MODEL
             opts = self.cfg.count_options(model_key)
             declared = self.cfg.count_options_declared(model_key)
             note = self.cfg.degradation_note(model_key)
@@ -743,6 +781,19 @@ class Service:
                     f"（服务端 generate_count_options 为空）⇒ 该模型的张数不可控，"
                     f"上游按自己的默认值出图；本服务请求的 n={n} 可能不生效。"
                     f"要控张数请换一个声明了张数选项的模型。")
+            elif len(declared) == 1 and n_raw is not None:
+                # 🔴 2026-10-02（mj82 触发）：**只声明了一个取值**（如 `[4]`）
+                # 与"声明了一串（1..4）"是**完全不同的语义** —— 前者张数**不可控**，
+                # 任何 n 都会被吸附成那一个值；后者才是"可自由选"。
+                # `declared is None` 那条**抓不到这一种**（它是 `[4]`，非空）。
+                # 症状：调用方要 1 张，我们报"已吸附为 4"，他以为拿到了 1 张 ——
+                # 实际 4 张，**且按 4 张计费**。这属于"让调用方算错成本"，
+                # 必须用一句话说清"这个模型的张数由上游定，你改不了"。
+                degradations.append(
+                    f"模型 {model_key} **张数不可控**（服务端只声明了一个取值 "
+                    f"{list(declared)}）⇒ 无论请求 n 多少，实际都按 {declared[0]} 张"
+                    f"出图并计费（本次 n={n_raw} 已按此处理）。"
+                    f"要自由控制张数请换一个声明了多个取值的模型。")
 
         now = int(time.time())
         rec = TaskRecord(
@@ -1418,9 +1469,16 @@ class Service:
             # blend 原生吃**列表** ⇒ 多张垫图一次带上；
             # 张数走与文生图**同一套吸附**（`generate_count_options`）——
             # 草稿里真的把 `gen_count` 写进 `abilities.gen_option` 了，所以 `n` 生效。
-            opts = self.cfg.count_options(DEFAULT_MODEL) if self.cfg else None
+            # 🔴 2026-10-02（mj82 触发）：**模型必须跟着走**。
+            # 原先这里写死 `DEFAULT_MODEL`（Lite），于是 `jm_image_model_yc_mj82`
+            # 这类"支持 byte_edit 的模型"在图生图里根本用不上——`blend()` 明明
+            # 有 `model` 参数，这里却没传。⇒ 换模型必须**连能力一起换**，
+            # 否则"我换了模型"只换了文生图，图生图还是旧模型（静默不一致）。
+            model_key = rec.upstream_model or DEFAULT_MODEL
+            opts = self.cfg.count_options(model_key) if self.cfg else None
             sid = self.client.blend(rec.prompt, image_uris=image_uris, size=size,
-                                    count=rec.n or 1, count_options=opts)
+                                    count=rec.n or 1, count_options=opts,
+                                    model=model_key)
         elif cap.jimeng_tool:
             # 后编辑族（hd / pro-hd / outpaint）：上游用单个 `origin_image` 承载输入图，
             # 但**张数同样是 `abilities.gen_option.gen_count`**（组件级字段）⇒ 一并传。

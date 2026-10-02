@@ -310,6 +310,11 @@ def _uid() -> str:
 #: `high_aes_general_v50`（默认模型）服务端声明的是 **1..8** ——
 #: 教训是**别用经验值替代可读的服务端数据**。
 COUNT_OPTIONS_BY_MODEL: dict[str, tuple[int, ...]] = {
+    # 🔴 2026-10-02 mj82（图片美学模型 V8.2）：服务端 `generate_count_options`
+    # 实读就是 **[4]**（`default_generate_count` 也是 4）。
+    # ⚠️ 这里只登记**服务端声明**，**不是**实测能控的取值 —— 实测结论见下方
+    # `MJ82_COUNT_EFFECTIVE`（`gen_count=2/3` 会被上游**静默改写**成 4）。
+    "jm_image_model_yc_mj82": (4,),
     "high_aes_general_v50_flash": (1, 2, 3, 4),
     "high_aes_general_v50": (1, 2, 3, 4, 5, 6, 7, 8),
     "high_aes_general_v50p_large": (1, 2, 3, 4),
@@ -323,6 +328,44 @@ COUNT_OPTIONS_BY_MODEL: dict[str, tuple[int, ...]] = {
 }
 #: 未登记模型的兜底：取各模型选项的**下确界**（最严的那个），宁少勿多。
 DEFAULT_COUNT_OPTIONS: tuple[int, ...] = (1, 2, 3, 4)
+
+#: 🔴🔴 mj82 **实测**张数规则（2026-10-02，**七发真跑** + 原始报文四字段交叉核对）：
+#:
+#: ⚠️ 先说**判据**，因为这里有两个都叫"张数"的字段，**只有草稿里那个算数**：
+#:
+#: | 字段 | 语义 | 能否用来判出图数 |
+#: |---|---|---|
+#: | `abilities.gen_option.gen_count`（草稿） | **实际执行的张数** | ✅ 唯一可信 |
+#: | `metrics_extra.generateCount` | 提交时的**请求/埋点**计数 | ❌ 恒为 1，不反映实际 |
+#!
+#: 🔴 2026-10-02 实测七发（`count`是我们要的，回执草稿值 = 上游实际采用值）：
+#:
+#: | 我们提交 | 回执草稿 `gen_count` | 实际出图（四字段一致） |
+#: |---|---|---|
+#: | 1 | 1 | **1** |
+#: | 1 | 1 | **1** |
+#: | 2 | **4** | 4（被抬） |
+#: | 3 | **4** | 4（被抬） |
+#: | 4 | 4 | 4 |
+#: | 1 | **4** | 4（被抬） |
+#: | 1 | **4** | 4（被抬） |
+#:
+#: ⇒ **同样传 1，有时出 1、有时出 4** —— 前两发是我**误把 `(1,2,3,4)`
+#: 喂给 `count_options`** 导致 `resolve_count` 原样透传 1（上游照办），
+#: 后两发改成 `(1,)` 后仍被抬成 4。
+#: 🔴 结论：**mj82 的张数实际上不可控**，`gen_count` 会被上游按自己的
+#: `generate_count_options=[4]` 归一；只有在**绕过吸附**且恰好落 1 时
+#: 才可能出 1 张，**这条路径不该依赖**（不稳定，且计费随之变化）。
+#: ⇒ 按**恒 4 张**设计与告知调用方（`service.create` 的
+#: `len(declared)==1` 分支会响亮留痕）。
+#: ⇒ 用户 2026-10-02 的 UI 抓包正是这一机制的**直接证据**：
+#: 草稿 `gen_count=4` 而 `metrics_extra.generateCount=1`。
+#:
+#: 🔴 判"实际出图几张"必须**四个独立字段一致**：`item_list` 长度 /
+#: 各 item 的 `large_images` 之和 / `total_image_count` /
+#: `finished_image_count`。（`parse_task` 每个 item 只取`large_images[0]`，
+#: 所以**不会**多报；但交叉核对能排除"某一字段单独异常"。）
+MJ82_COUNT_EFFECTIVE: tuple[int, ...] = (1, 4)
 
 
 def count_options(model: str) -> tuple[int, ...]:

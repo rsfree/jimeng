@@ -605,3 +605,94 @@ python scripts/dump_video_models.py --all --raw /tmp/cfg.json
 * `VIDEO_RESOLUTIONS` 增 `"480p"`（实抓小写）。样片产物 = 480P 低清版，
   网页端"确认升级高清正片"流程本服务未适配。
 * 探针：`scripts/probe_t2v_25_draft.py`（**计费动作**，跑一次扣 45）。
+
+## 17. 图片美学模型 V8.2 / mj82（2026-10-02）
+
+**上游 key** `jm_image_model_yc_mj82`，面板名 **图片美学模型 V8.2**
+（能力表 `model_name` 逐字照抄）。用户 2026-10-02 UI 抓包带入。
+
+### 17.1 提交包与 Seedream 系**完全同构**
+同为 `image_base_component` + `abilities.generate.core_param` +组件级
+`gen_option` ⇒ **不需要新的提交流程**，登记进 `UPSTREAM_MODEL_KEYS` 即走现成 t2i 分支。
+命名风格完全不同（`jm_image_model_*`，非 `high_aes_general_*`），
+但**结构相同** —— 别被命名骗以为要新写一套。
+
+### 17.2 🔴 张数**不可控**：按恒 4 张设计与告知
+
+服务端能力表实读：`generate_count_options=[4]`、`default_generate_count=4`。
+
+**七发真跑的实测表**（`count` = 我们要的，回执草稿值 = 上游实际采用值）：
+
+| 我们提交 | 回执草稿 `gen_count` | 实际出图（四字段一致） |
+|---|---|---|
+| 1 | 1 | **1** |
+| 1 | 1 | **1** |
+| 2 | **4** | 4 |
+| 3 | **4** | 4 |
+| 4 | 4 | 4 |
+| 1 | **4** | 4 |
+| 1 | **4** | 4 |
+
+⇒ **同样传 1，有时出 1、有时出 4。** 前两发出 1 是因为我把
+`(1,2,3,4)` 喂给 `count_options`，`resolve_count` 于是原样透传 1、上游照办；
+后两发改传 `(1,)` 后**仍被抬成 4**。
+**结论：mj82 的张数实际不可控**，`gen_count` 被上游按自己的 `[4]` 归一。
+只有在"绕过吸附且恰好落 1"时才可能出 1 张，**这条路径不可依赖**
+（不稳定，且计费随之变化：出 1 张扣 7、出 4 张扣 28）。
+⇒ 按**恒 4 张**设计与告知调用方。
+
+#### 两个都叫"张数"的字段，只有一个能用来判产物
+| 字段 | 语义 | 能否判出图数 |
+|---|---|---|
+| `abilities.gen_option.gen_count`（草稿） | **实际执行张数** | ✅ 唯一可信 |
+| `metrics_extra.generateCount` | 提交时的**请求/埋点**计数 | ❌ 恒为 1 |
+
+🔴 用户 2026-10-02 的 UI 抓包正是这一机制的**直接证据**：
+草稿 `gen_count=4` 而 `metrics_extra.generateCount=1` —— 埋点记 1、实际出 4。
+⚠️ 这也复现了本项目早就踩过的坑（`client.py` 注释里写着
+"`metrics_extra.generateCount` 只是埋点计数、实测它写 1 也照样出 4 张"）——
+**同一个机制在 mj82 上再现**，别以为换个模型就换个规律。
+
+#### 判"出图几张"必须四字段交叉核对
+`item_list` 长度 / 各 item 的 `large_images` 之和 / `total_image_count` /
+`finished_image_count`。四者一致才认。
+（`parse_task` 每个 item 只取 `large_images[0]`，所以它**不会多报**；
+但交叉核对能排除单一字段异常 —— 这条探针就是靠它才没被"1 张"骗过去。）
+
+⚠️ **别把 `(1,2,3,4)` 喂给 `count_options`**：会让 `resolve_count`
+原样透传 2/3 然后被上游静默改写成 4 ⇒ 我们报 n=3、实际出 4 张、按 4 张计费。
+要 n 张就只传 n，其余靠 `service.create` 的 `len(declared)==1` 留痕告知。
+
+### 17.3 计费：出图数决定，不是 5/张固定
+消耗记录按 `submit_id` 对账：
+| 出图 | 实扣 | 每张 |
+|---|---|---|
+| 1 张 | **7** | 7 |
+| 4 张（1k） | **20** | 5 |
+| 4 张（2k） | **28** | 7 |
+🔴 单价**不是常数**（1k 5/张、2k 7/张），且 1 张也要 7（不是 5）
+⇒ 计价大概率按"档位最低消费"或分辨率×张数组合，**规则未解**。
+`UPSTREAM_MODEL_CREDITS` 里暂填 **5**（1k 四张口径）并在此标注不确定。
+提交包 `amount=1` 是**档位标记**（`image_basic_mj82_fast_1k`），不是单价。
+2k 档 `image_basic_mj82_fast_2khd`。
+
+### 17.4 分辨率
+`resolution_map`：1k（1024²/768×1024/1024×576…）与 2k（2048²/1728×2304…），
+`default_resolution_type="1k"`。
+
+### 17.5 支持图生图（byte_edit）
+`feats` 含 `t2i` + `byte_edit` + `simple_image` + `per_piece` + `refuse_image`；
+`input_image_limit=[{"max_image_num":20,"ability_name":"byte_edit"}]`。
+⇒ 2026-10-02 已打通i2i：**原先 `resolve` 只在 t2i 族返回上游模型**，
+带图 + `model=mj82` 会撞"t2i 不接受输入图"的 400 ——
+`blend()` 明明有 `model` 参数却没传。现已连能力带模型一起换。
+⚠️ 是否支持 blend **只认服务端 `feats`**（`upstream_supports_blend`），
+读不到 ⇒ 保守拒绝（"读得到≠用得了"的反向纪律）。
+
+### 17.6 别名键必须与归一化输出**逐字一致**（踩坑记录）
+`_norm_model_name` 会小写并把 `.`/空格换成 `-`：
+`mj-v8.2` → `mj-v8-2`（**v 保留**）、`图片美学模型 V8.2` → `图片美学模型-v8-2`。
+🔴 我曾把键写成 `mj-8-2`（m/j 顺序颠倒）⇒ **永远查不中**，
+而既有门禁 `test_every_web_alias_maps_to_a_registered_upstream_model`
+**抓不到**（它遍历表内键 —— 错的键自己撞自己仍"通过"）。
+已补 `test_every_alias_key_is_in_normalised_form` 把这类沉默失配在导入期照出来。

@@ -499,15 +499,31 @@ Authorization: Bearer <key>
 **占位名**（`auto` / `dall-e-3` / `gpt-image-1` / `seedream-*` …）等价于"没写 `model`"，
 走默认推导 —— 第三方 SDK 常硬编码这些值，它们不代表调用意图。
 
+🔴 **占位名兜底会留痕（2026-10-02 新增）**：`seedream-*` 前缀在
+`PLACEHOLDER_PREFIXES` 里，所以**任何 `seedream-<我们没登记的型号>`**
+（`seedream-9-9-ultra` / `seedream-4-9` / `seedream-5-0` …）都会被判成占位名
+⇒ 兜底到**免费**默认档（`high_aes_general_v50`）出图。
+**兜底本身是设计意图**（不存在的型号不该硬报 400），但**必须是可见的**：
+这类请求的 `degradations` 会带一条
+
+> `model='…' 不是本服务已登记的型号（也不在面板名里），已按占位名兜底到 'high_aes_general_v50'（免费档）。要指定具体型号请用 GET /v1/models 里的名字。`
+
+调用方据此知道拿到的是兜底图。**已登记的型号不产生这条留痕**，
+「不写 `model`」的正常默认推导也不算降级。
+（实测记录：v0.1.9 线上这两条留痕是**空**的 —— 调用方拿到的是它没点的模型
+却毫无察觉。门禁见 `tests/test_models.py::test_unregistered_seedream_falls_back_to_free_default`。）
+
 🔴 **别按名字选工具**：`pro-hd`（"智能超清"）只出 2160²，
 而 `hd`（"超清"）出 4096² —— 名字里的"更高级"是错觉。
 
 ### 刻意缺席的能力
 
-**`jimeng-detail-fix`（细节修复）不注册**：两次真实提交都返回
-`status=30 generate_failed`，且**照样计费**。按「不制造假能力」摘除 ——
-它不出现在 `/v1/models`，请求它会被拒为未知模型。
-工具描述仍留在 `client.POST_EDIT_TOOLS` 供将来续查。
+（历史记录：`jimeng-detail-fix` 曾因"直接贴 `origin_image` 两次 `generate_failed`
+且照样计费"被摘除。2026-09-20 查明死因是 `origin_image` 这个**形态**不被支持，
+改用**引用形态**（`source_task_id` 指向本服务已成功的图片任务）后一次真跑成功
+⇒ 已重新注册，`credits_measured=0`。2026-10-02 复跑再次通过（22.4s）。
+**教训**：能力"失败"时先分清是**形态不对**还是**能力不存在** ——
+前者可修，后者才摘除。）
 
 ---
 

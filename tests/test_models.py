@@ -12,6 +12,7 @@ from app.models import (
     catalog,
     is_placeholder,
     resolve,
+    take_fallback_note,
 )
 
 
@@ -238,6 +239,166 @@ def test_catalog_exposes_ark_name_for_t2i_only():
             assert "upstream_models" not in m, m["id"]
 
 
+MJ = "jm_image_model_yc_mj82"
+
+
+def test_mj82_is_registered_across_all_four_tables():
+    """mj82（图片美学模型 V8.2）四表齐全，且**实测价不是 None**。
+
+    依据 = 2026-10-02 服务端能力表实读 + 端到端实跑（4 张实扣 20）。
+    它的实测价必须钉住：`UPSTREAM_MODEL_CREDITS` 里填 `None`（未实测）时，
+    调用方算不出成本 —— 而 mj82 是**按模型计价**里最容易被漏的一档。
+    """
+    from app.models import (UPSTREAM_MODEL_CREDITS, UPSTREAM_MODEL_KEYS,
+                            UPSTREAM_WEB_NAMES)
+
+    assert MJ in UPSTREAM_MODEL_KEYS, "mj82 未登记进白名单"
+    assert UPSTREAM_WEB_NAMES[MJ] == "图片美学模型 V8.2", \
+        "面板名必须逐字照抄能力表 model_name"
+    assert UPSTREAM_MODEL_CREDITS[MJ] == 5, \
+        "mj82 实测 5/张（4 张实扣 20）；None 会让调用方算错成本"
+
+
+@pytest.mark.parametrize("written", [
+    "图片美学模型 V8.2", "图片美学模型-V8.2", "图片美学模型 8.2",
+    "mj-v8.2", "MJ-V8.2", "mj v8.2", "mj-v82", "mj82",
+    "jm-8-2", "jm 8.2", "JM 8.2", MJ,
+])
+def test_mj82_name_variants_all_reach_it(written):
+    """mj82 的各种写法都要能命中（面板名带空格与点，都要归一）。
+
+    ⚠️ 归一化把 `.`/空格都换成 `-` 并**转小写**，所以 `mj-v8.2` → `mj-v8-2`、
+    `图片美学模型 V8.2` → `图片美学模型-v8-2`。**别名表的键必须与归一输出逐字
+    一致** —— 写成 `mj-8-2`（m/j 顺序颠倒）就永远查不中，且症状很隐蔽：
+    表里明明有这条别名，resolve 却报"未知模型"。
+    """
+    cap, model = resolve(written, has_image=False)
+    assert cap.api_id == "jimeng-t2i", written
+    assert model == MJ, written
+
+
+def test_every_alias_key_is_in_normalised_form():
+    """🔴 别名表的**每个键**都必须等于 `_norm_model_name(该键)`。
+
+    为什么这条值得单列：键写错（大小写、连字符、m/j 顺序）时
+    `resolve` 查不中 ⇒ "表里有这个别名但报未知模型"。
+    这是**沉默失配**—— 看代码觉得配了，运行时却没有；
+    且 `test_every_web_alias_maps_to_a_registered_upstream_model`
+    那条门禁**抓不到**（它遍历的是表里的键 —— 错的键自己撞自己，仍然"通过"）。
+
+    这条门禁的作用就是把"错键"在导入期就照出来。
+    """
+    from app.models import _norm_model_name, UPSTREAM_MODEL_ALIASES
+
+    for written in UPSTREAM_MODEL_ALIASES:
+        norm = _norm_model_name(written)
+        assert norm == written, (
+            f"别名键 {written!r} 不是归一形态（应为 {norm!r}）—— "
+            f"resolve 查不中，且既有门禁抓不到")
+
+
+def test_mj82_declares_four_images_and_is_marked_uncontrollable():
+    """🔴 mj82 **张数不可控** ⇒ 按恒 4 张设计与告知。
+
+    证据（2026-10-02 七发真跑 + 原始报文四字段交叉核对）：
+      · 服务端 `generate_count_options=[4]` / `default_generate_count=4`；
+      · 传 2/3/4 一律出 4 张（回执草稿 `gen_count` 被归一成 4）；
+      · 传 1 **多数被抬成 4**（仅在绕过吸附且恰好落 1 时出过 1 张，
+        该路径不稳定、计费也随之变化，**不可依赖**）。
+    ⇒ 唯一稳定的契约是"恒 4 张"。本门禁钉住三件事：
+      ① 声明值是唯一取值 4；② 任何 n 都被吸附成 4 且留痕；
+      ③ 受理层有"张数不可控"的响亮留痕（否则调用方误以为拿到 n 张）。
+    """
+    cap, model = resolve(MJ, has_image=False)
+    assert (cap.api_id, model) == ("jimeng-t2i", MJ)
+    from app.upstream.jimeng.client import (COUNT_OPTIONS_BY_MODEL,
+                                            MJ82_COUNT_EFFECTIVE, resolve_count)
+
+    opts = COUNT_OPTIONS_BY_MODEL[MJ]
+    assert len(opts) == 1 and opts[0] == 4, \
+        f"mj82 的服务端声明应是唯一取值 (4,)，实得 {opts}"
+    for want in (1, 2, 3, 4, 8):
+        n, _ = resolve_count(MJ, want, opts)
+        assert n == 4, f"请求 {want} 张必须被吸附成 4，实得 {n}"
+    # ⚠️ 留痕**不在** `resolve_count`：n=4 恰在声明取值内 ⇒ 它不产告警
+    #（"没告警"≠"张数可控"，单值声明本身就是不可控）。
+    # 真正的告知在 `service.create` 的 `len(declared)==1` 分支 ——
+    # 那条已由test_count_uncontrollable_model_is_reported_not_silently_snapped 钉住。
+    # 这里只钉"单值声明 + 给了 n（含n=4）⇒ 必走那条留痕"的判据本身。
+    import inspect
+    from app.service import Service
+    src = inspect.getsource(Service.create)
+    assert "elif len(declared) == 1 and n_raw is not None:" in src, \
+        "单值声明 + 给了 n 时必须走『张数不可控』留痕（含 n 恰等于声明值的情形）"
+    # 实测规律表也要在（它是"为什么恒 4 张"的证据载体）
+    assert MJ82_COUNT_EFFECTIVE == (1, 4), MJ82_COUNT_EFFECTIVE
+
+
+def test_mj82_credit_is_flagged_as_unsettled_per_image():
+    """🔴 mj82 的"每张单价"**未解**：1k 4 张=20（5/张）但 1 张=7。
+
+    实测：4 张 1k 扣 20、4 张 2k 扣 28、**1 张 1k 也扣 7**（不是 5）
+    ⇒ 单价不是常数（疑似"档位最低消费"），**规则未解**。
+    这里断言"登记表里的值必须是已知口径之一"，并在口径变化时强制更新注释 ——
+    避免"填了个看着合理的数字"被当成实测值用（那会让调用方算错成本）。
+    """
+    from app.models import UPSTREAM_MODEL_CREDITS
+
+    # 已知实测口径：1k 四张 ⇒ 20/4 = 5/张
+    assert UPSTREAM_MODEL_CREDITS[MJ] == 5, \
+        "1k 四张口径 = 5/张；若实测口径变了请同步 UPSTREAM.md §17.3 的表格"
+
+
+def test_count_uncontrollable_model_is_reported_not_silently_snapped():
+    """受理层：只声明一个取值的模型必须额外留痕"张数不可控"。
+
+    为什么单列一条门禁：`count_options_declared is None` 那条分支**抓不到**
+    `[4]` 这种（非空但唯一）声明 ⇒ 若无此留痕，mj82 的"恒 4 张"就成了
+    静默行为。这是"让调用方算错成本"那类错，必须挡住。
+    """
+    from app.service import Service
+    import inspect
+
+    src = inspect.getsource(Service.create)
+    assert "张数不可控" in src, \
+        "受理路径必须对'只声明一个取值'的模型留痕（否则恒 4 张静默发生）"
+    assert "len(declared) == 1" in src, \
+        "判据必须是 len(声明)==1，而不是只判 None"
+
+
+def test_i2i_accepts_upstream_model_and_t2i_does_not_swallow_it():
+    """带输入图 + 上游模型名 ⇒ 落**i2i**（blend），不是 t2i。
+
+    🔴 这条是接线门禁：原先 `resolve` 只在 t2i 族返回上游模型，
+    于是 `model=mj82` + 带图会撞"t2i 不接受输入图"的 400 ——
+    而 mj82 的 `feats` 明明含 `byte_edit`（服务端已宣告支持图生图）。
+    """
+    cap, model = resolve(MJ, has_image=True)
+    assert cap.api_id == "jimeng-i2i", "带图时应解析为 i2i"
+    assert model == MJ, "上游模型必须一起带下去（图生图也要换模型）"
+    # 不带图时仍是 t2i —— 别把两条链路搞反
+    cap2, model2 = resolve(MJ, has_image=False)
+    assert (cap2.api_id, model2) == ("jimeng-t2i", MJ)
+
+
+def test_blend_capability_is_read_from_server_not_hardcoded():
+    """`upstream_supports_blend` 只认**服务端能力表**，读不到 ⇒ False。
+
+    "读得到 ≠ 用得了"（v30l 教训）的镜像：**表里没有也别乐观假设**。
+    猜错的后果是建任务后才炸（上传完垫图、提交被打回）。
+    """
+    from app.models import set_blend_capable, upstream_supports_blend
+
+    set_blend_capable({MJ: True})
+    assert upstream_supports_blend(MJ) is True
+    set_blend_capable({MJ: False})
+    assert upstream_supports_blend(MJ) is False, "能力表说没有就是没有"
+    set_blend_capable({})
+    assert upstream_supports_blend(MJ) is False, \
+        "读不到能力表时必须保守拒绝（不能默认 True）"
+    assert upstream_supports_blend("never-heard-of-this-model") is False
+
+
 def test_upstream_name_tables_do_not_drift():
     """`UPSTREAM_MODEL_KEYS` 与 `UPSTREAM_WEB_NAMES` 必须是**同一集合**。
 
@@ -359,8 +520,13 @@ def test_credits_measured_reflects_actual_charges_not_forecasts():
         "hd 实扣 0（免费）；勿按回执 forecast 9 改"
     assert by["jimeng-pro-hd"].credits_measured == 1, \
         "pro-hd 实扣 1（9-22 消耗记录 + submit_id 归属核实）"
-    assert by["jimeng-outpaint"].credits_measured is None, \
-        "outpaint 实扣未对账 ⇒ 保持 None（None ≠ 免费，更 ≠ forecast 28）"
+    #: 2026-10-02 更新：outpaint **首次对账完成** —— 实扣 **1**
+    #: （submit_id `0e12b55d`，余额差分 + 消耗记录 + 任务表三证吻合），
+    #: 从 `None` 升级为实测值。**注意 forecast 报的是 35** ⇒ 高估 35 倍，
+    #: 这正是本门禁要防的那类污染。旧的"必须保持 None"断言随之作废。
+    assert by["jimeng-outpaint"].credits_measured == 1, \
+        "outpaint 实扣 1（10-02 三证对账）；若再改回 None 说明有人把 "\
+        "forecast/未对账当成了结论"
     assert by["jimeng-t2v"].credits_measured == 24, "t2v 实扣 24（9-20 三证对账）"
     for api_id in ("jimeng-hd", "jimeng-pro-hd", "jimeng-outpaint", "jimeng-t2v"):
         assert ("forecast" in by[api_id].notes) or ("预报" in by[api_id].notes), \
@@ -398,3 +564,61 @@ def test_new_upstream_model_flash_is_registered_with_declared_count_options():
     #: notes 必须如实标明"实跑"，而不是还停在"服务端宣告、未验证"。
     assert key in cap.notes and "实跑" in cap.notes, \
         "已跑过的模型，notes 必须写明实跑记录"
+
+
+# ---------------------------------------------------------------------------
+# 占位名兜底必须**留痕**（2026-10-02 实测缺陷的防回归门禁）
+# ---------------------------------------------------------------------------
+
+#: 实测会静默降级的三种写法：`PLACEHOLDER_PREFIXES` 收了 `seedream` 前缀，
+#: 于是任何 `seedream-<不存在的型号>` 都被判成占位名 ⇒ 走默认推导 ⇒ 真出图。
+#: 2026-10-02 线上实测：`seedream-9-9-ultra` 与 `seedream-4-9` 均返回 200
+#: 并出图成功（submit_id 9154eaa2 / 第二次 34.9s），而响应体 `degradations` 为空。
+UNREGISTERED_PLACEHOLDERS = ["seedream-9-9-ultra", "seedream-4-9", "seedream-5-0"]
+
+
+@pytest.mark.parametrize("name", UNREGISTERED_PLACEHOLDERS)
+def test_unregistered_seedream_falls_back_to_free_default(name):
+    """兜底到**免费**默认档这件事本身是允许的（用户口径）。
+
+    钉的是两件事：① 落点必须是**免费**的默认模型（悄悄升到收费档更坏）；
+    ② 必须**留下痕迹** —— 调用方有权知道自己拿到的是兜底图。
+    """
+    cap, model = resolve(name, has_image=False)
+    assert cap.api_id == "jimeng-t2i"
+    assert model == "high_aes_general_v50", \
+        "未登记型号只能兜底到免费默认档；绝不能悄悄换成收费模型"
+
+    note = take_fallback_note()
+    assert note is not None, f"{name!r} 走了兜底却没有任何留痕 —— 这就是静默降级"
+    assert name in note, "留痕必须写明调用方原始写了什么"
+    assert "high_aes_general_v50" in note, "留痕必须写明实际生效成了哪个模型"
+
+
+def test_known_model_names_are_not_reported_as_fallback():
+    """反向门禁：**认得的名字不许被记成降级**，否则留痕会变成噪声。"""
+    for name in ("Seedream 5.0 Flash", "high_aes_general_v50p_large",
+                 "jimeng-t2i", "图片-5-0-Pro"):
+        resolve(name, has_image=False)
+        assert take_fallback_note() is None, \
+            f"{name!r} 是已登记型号，不该产生兜底留痕"
+
+
+def test_omitting_model_is_not_a_fallback():
+    """「没写 model」的正常默认推导**不算降级** —— 它是文档承诺的行为。"""
+    cap, model = resolve(None, has_image=False)
+    assert cap.api_id == "jimeng-t2i"
+    assert take_fallback_note() is None, \
+        "没写 model 是正常用法，不该被报成降级"
+
+
+def test_fallback_note_does_not_leak_across_calls():
+    """模块级状态的经典串味防护：取走即清，且认得的名字会主动清空。"""
+    resolve("seedream-9-9-ultra", has_image=False)
+    assert take_fallback_note() is not None
+    assert take_fallback_note() is None, "取走即清 —— 同一请求不该读到两条"
+
+    #: 上一次是兜底，这一次是认得的名字 ⇒ 不许把上一轮的留痕带过来
+    resolve("seedream-9-9-ultra", has_image=False)
+    resolve("Seedream 5.0 Flash", has_image=False)
+    assert take_fallback_note() is None, "认得的名字必须清掉上一轮兜底记录"

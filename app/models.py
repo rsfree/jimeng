@@ -50,7 +50,16 @@ DEFAULT_UPSTREAM_MODEL = "high_aes_general_v50"
 #: ⇒ 登记依据是**上游自己宣告**（"能读的就不许猜"），**不是端到端实跑**：
 #: 文档/notes 里必须标明这一点，别把它当"已验证"。
 #: 反例警示：v30l 那两条也是表里有的，但实跑 `ret=1006` —— 读得到 ≠ 用得了。
+#: 🔴 `jm_image_model_yc_mj82`（**图片美学模型 V8.2**）是**异类**：它不属��
+#: Seedream 系，命名风格完全不同（`jm_image_model_*`），但**提交包结构与 t2i
+#: 完全同构**（同为 `image_base_component` + `abilities.generate.core_param`），
+#: ⇒ **不需要新的提交流程**，登记进白名单即可走现成的 t2i 分支。
+#: 证据等级（2026-10-02）：**能力表实读 + 端到端实跑**（用户 UI 抓包 + 本仓探针
+#: 四发全通，见 docs/UPSTREAM.md）。
+#: ⚠️ **张数不可控**：`generate_count_options=[4]` / `default_generate_count=4`
+#: ⇒ 恒出 4 张。这是服务端声明，不是我们的实现选择。
 UPSTREAM_MODEL_KEYS: tuple[str, ...] = (
+    "jm_image_model_yc_mj82",
     "high_aes_general_v50_flash",
     "high_aes_general_v50",
     "high_aes_general_v50p_large",
@@ -116,6 +125,20 @@ UPSTREAM_ARK_NAMES: dict[str, str] = {
 #:    的判断被显式放宽）—— 否则 `Seedream 5.0 Flash` 会被 `PLACEHOLDER_PREFIXES`
 #:    的 `seedream` 前缀吃掉，变成"调用方点了 Flash、拿到 Lite"。
 UPSTREAM_MODEL_ALIASES: dict[str, str] = {
+    # ---- 图片美学模型 V8.2（mj 系列，命名风格与 Seedream 完全不同）----
+    # 面板上显示的是 "图片美学模型 V8.2"（能力表 `model_name`，逐字照抄），
+    "图片美学模型-v8-2": "jm_image_model_yc_mj82",
+    "图片美学模型-8-2": "jm_image_model_yc_mj82",
+    # 🔴 归一化后的键是 `jm-8-2`（**m 在前 j 在后**）—— 别名键必须与
+    # `_norm_model_name` 的输出**逐字**一致，写成 `mj-8-2` 会永远查不中
+    # （症状：手动看着"有这条别名"，实际 resolve 报未知模型）。
+    "jm-8-2": "jm_image_model_yc_mj82",
+    # 🔴 `mj-v8.2` 归一后是 `mj-v8-2`（点→连字符，**v 保留**），
+    # 与上面 `mj-8-2` 是**两个不同的键** —— 只登记后者会漏掉用户原话里的写法。
+    "mj-v8-2": "jm_image_model_yc_mj82",
+    "mj-v82": "jm_image_model_yc_mj82",
+    # 归一化会小写 ⇒ 大写写法命中的是同一个键；这里显式登记 `jm82` 简写
+    "mj82": "jm_image_model_yc_mj82",
     # ---- Seedream 5.0 家族 ----
     "seedream-5-0-pro": "high_aes_general_v50p_large",
     "seedream-5-pro": "high_aes_general_v50p_large",
@@ -175,6 +198,7 @@ UNSUPPORTED_WEB_MODELS: dict[str, str] = {
 #: 单一真相：`GET /v1/models` 的 `upstream_models` 由它渲染，
 #: 门禁断言"已登记 key 集合 == 本表键集合"，防止两张表漂移。
 UPSTREAM_WEB_NAMES: dict[str, str] = {
+    "jm_image_model_yc_mj82": "图片美学模型 V8.2",  # 逐字照抄能力表 model_name
     "high_aes_general_v50p_large": "Seedream 5.0 Pro",
     "high_aes_general_v50_flash": "Seedream 5.0 Flash",
     "high_aes_general_v50": "Seedream 5.0 Lite",
@@ -192,6 +216,8 @@ UPSTREAM_WEB_NAMES: dict[str, str] = {
 #: 换模型就换价：Flash 实测 **3**、Pro 实测 **8**。把能力级的值抄给每个上游模型，
 #: 等于对 Flash 报"免费"（那是会让调用方算错成本的那种错）。
 UPSTREAM_MODEL_CREDITS: dict[str, int | None] = {
+    # 2026-10-02 实测：4 张实扣 **20**（=5/张）；提交包预扣 amount=1 只是档位标记
+    "jm_image_model_yc_mj82": 5,
     "high_aes_general_v50_flash": 3,      # 2026-09-23 实跑（2k/1 张，三证吻合）
     "high_aes_general_v50": 0,            # 2026-09-20 实测免费（Lite）
     "high_aes_general_v50p_large": 8,     # 2026-09-20 实测（三尺寸同价）
@@ -293,6 +319,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         #: ⚠️ 证据确有冲突（那条记录真实存在），可能是**免费期开始前**的调用、
         #: 或属于别的计费口径。**以账号所有者的口径为准**，但冲突本身记在这里，
         #: 免得后人再看到那条记录又改回去。
+        #:
+        #: 🔴 **2026-10-02 复核（submit_id 级，结论：维持 0）**：本次实跑三笔
+        #: i2i（垫图 ×1/×2/×4，submit_id `792d0e65` / `5f4e930f` / `88ae3ad1`）
+        #: 在 `user_credit_history` 里**全部零记录**（翻了 4 页仍未命中）。
+        #: 同期账单确有 `amount=7` 两笔，但它们**不属于本服务**：
+        #: `c8759dc6` 记于 21:41:19（早于我方首笔 i2i 的 21:44:53）、
+        #: `fcb4adbb` 记于 21:45:22（submit_id 对不上）—— 那是账号所有者
+        #: **在网页端并发使用同一账号**产生的。
+        #: ⇒ **教训**：同账号有并发调用方时，**「时间邻近」不能用来归因**，
+        #: 只有 `submit_id` 逐笔对齐算数。我第一轮就误判过一次。
         jimeng_tool="blend", credits_measured=0,
         #: blend 是**唯一**原生用「列表」承载输入图的能力：
         #: 草稿里是 `abilities.blend.ability_list[0].image_uri_list`（列表）
@@ -310,7 +346,8 @@ CAPABILITIES: tuple[Capability, ...] = (
               "支持**多张垫图**（最多 4 张，超出会明确报错）。"
               "支持**指定张数** `n`（走 `abilities.gen_option.gen_count`）。"
               "⚠️ 上游**预报**积分与张数不成正比：n=1 报 59 / n=4 报 55 —— 那是 "
-              "`forecast`（高估口径），**实扣为 0**（免费，账号所有者确认）⇒ "
+              "`forecast`（高估口径），**实扣为 0**（免费，账号所有者确认；"
+              "2026-10-02 三笔实跑 submit_id 零出账复核）⇒ "
               "别把预报当账单，也别按「张数 × 单价」估算成本。",
     ),
     Capability(
@@ -333,10 +370,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         key="jimeng:outpaint", name="outpaint", title="扩图（OutPaint）",
         accepts_image=True, image_required=True, prompt_required=False,
-        jimeng_tool="outpaint", credits_measured=None,
-        notes="实测一次出 **4 张 4000×4000**，**与请求张数无关**（由上游决定）。"
-              "⚠️ 回执 forecast 预报 28 积分（按 4 张）—— **实扣未对账**，"
-              "未验证前不报数（字段保持 `None`，`None` ≠ 免费）。",
+        jimeng_tool="outpaint", credits_measured=1,
+        notes="**✅ 2026-10-02 首次对账：实扣 1 积分**（submit_id `0e12b55d`，"
+              "余额差分 + 消耗记录 `图片生成 amount=1` + 任务表 submit_id 三证吻合）。"
+              "回执 forecast 报 **35** ⇒ **高估 35 倍**，别拿它算账。"
+              "⚠️ **张数与旧记载不符**：旧 notes 写「一次出 4 张」，"
+              "本次实跑 `n=1` **只交付 1 张**（200/success，43.0s）。"
+              "尺寸仍是 **4000×4000**（下载 PIL 实测，6.07MB）—— 尺寸没变、"
+              "张数变了。「张数由上游决定、与 n 无关」这个说法**尚未二次验证**"
+              "（只跑过 n=1 这一档），要下结论需再跑 n=2/n=4 对照。",
     ),
     Capability(
         key="jimeng:t2v", name="t2v", title="文生视频（Seedance）",
@@ -505,6 +547,41 @@ def is_placeholder(model: str | None) -> bool:
     return any(low.startswith(p) for p in PLACEHOLDER_PREFIXES)
 
 
+#: 🔴 **最近一次 `resolve()` 走的兜底路径**：`{原始写法: 实际生效的模型}`。
+#:
+#: 2026-10-02 实测的缺陷：`seedream-9-9-ultra` 这种**不存在的型号**，
+#: 因为带 `seedream` 前缀被判成占位名 ⇒ 走默认推导 ⇒ **真出图**（200，
+#: submit_id 9154eaa2，23s）。**兜底到免费模型这件事本身没问题**（用户口径：
+#: 不存在的型号用免费的兜底出图可以接受），问题在于它是**静默**的 ——
+#: 调用方拿到的是它没点的模型，响应体里却没有任何痕迹。
+#:
+#: ⇒ 修法不是改成 400，而是**留痕**：`Service` 读 `take_fallback_note()`
+#: 写进 `degradations`，让"降级"在响应体里可见。
+#:
+#: 为什么用模块级而不是改返回值：`resolve()` 的返回类型 `(Capability, str|None)`
+#: 被 tests/e2e/Service/Ark 门面多处消费，改成三元素会波及全链路；用一个
+#: 显式「取走即清」的函数保持等价信息量，且**调用方不取也不会串味**
+#: （每次 `resolve` 成功路径都会重写它）。
+_LAST_FALLBACK: dict[str, str] = {}
+
+
+def note_fallback(requested: str, effective: str) -> None:
+    """登记一次「占位名 ⇒ 兜底模型」。由 `resolve` 内部调用。"""
+    _LAST_FALLBACK.clear()
+    _LAST_FALLBACK[requested] = effective
+
+
+def take_fallback_note() -> str | None:
+    """取走并清空最近一次兜底记录（取走即清，避免跨请求串味）。"""
+    if not _LAST_FALLBACK:
+        return None
+    requested, effective = next(iter(_LAST_FALLBACK.items()))
+    _LAST_FALLBACK.clear()
+    return (f"model={requested!r} 不是本服务已登记的型号（也不在面板名里）"
+            f"，已按占位名兜底到 {effective!r}（免费档）。"
+            f"要指定具体型号请用 GET /v1/models 里的名字。")
+
+
 def _hint() -> str:
     ids = ", ".join(c.api_id for c in CAPABILITIES)
     return (f"model 取值：{ids}；"
@@ -513,6 +590,29 @@ def _hint() -> str:
             f"中文别名、web 面板名（如 `Seedream 5.0 Flash` / `5.0 Lite` / `4.7`），"
             f"或直接写上游模型 key（如 {DEFAULT_UPSTREAM_MODEL}）。"
             f"完整清单见 GET /v1/models")
+
+
+def upstream_supports_blend(upstream_key: str) -> bool:
+    """该上游模型**是否声明支持 blend（图生图）**。
+
+    🔴 **只认服务端能力表**（`capabilities.py` 读 `get_common_config` 的
+    `feats`），读不到就返回 **False**（= 不许用）——
+    "读得到 ≠ 用得了"（v30l 的教训：表里有，实跑 `ret=1006`）。
+    反过来也成立：**表里没有 ≠ 一定不行**，只是我们没有依据 ⇒ 保守拒绝，
+    并让报错说清"去用不带模型名的 jimeng-i2i"。
+    """
+    return _BLEND_CAPABLE.get(upstream_key, False)
+
+
+#: 由 `service.Service` 在启动/首次使用时从能力表回填：
+#: `{上游 key: feats 里含 byte_edit}`。**不写死** —— 上游随时会改这张表。
+_BLEND_CAPABLE: dict[str, bool] = {}
+
+
+def set_blend_capable(mapping: dict[str, bool]) -> None:
+    """回填"哪些上游模型支持 blend"（由 Service 调，测试可直接注入）。"""
+    _BLEND_CAPABLE.clear()
+    _BLEND_CAPABLE.update({k: bool(v) for k, v in mapping.items()})
 
 
 def resolve(model: str | None, *, has_image: bool,
@@ -546,9 +646,18 @@ def resolve(model: str | None, *, has_image: bool,
     #: （如 `doubao-seedream-5-0-pro-260628`）命不中别名，**仍按占位处理**。
     #: 这个分叉是刻意的：认一个没实测过的方舟名 = 替调用方悄悄换到
     #: 8 积分/张的 Pro 链路（"占位名走默认 Lite"只差 8 积分，但不能这么坑人）。
-    if raw and (not is_placeholder(raw)
+    #: 🔴 2026-10-02：占位判必须用**小写**后的 `raw`。
+    #: 原来传的是原始 `raw` ⇒ `JM-8-2` 这类**大写**写法既不被认成占位
+    #: （`PLACEHOLDER_PREFIXES` 里是小写 `mj-`/`seedream-`）、
+    #: 又因别名表键是小写而查不中 ⇒ 落进"未知模型" 400。
+    #: 症状：同一模型 `mj-8-2` 能用、`JM-8-2` 报未知 —— 纯大小写之差。
+    if raw and (not is_placeholder(raw.lower())
                 or norm in UPSTREAM_MODEL_ALIASES
                 or norm in UNSUPPORTED_WEB_MODELS):
+        #: 走"认得"这条路 ⇒ 不是兜底 ⇒ 清掉可能存在的上一轮记录，
+        #: 否则调用方不取 `take_fallback_note()` 时会读到**上一次请求**的留痕
+        #: （模块级状态的经典串味）。下方只有兜底分支会重新写。
+        _LAST_FALLBACK.clear()
         low = raw.lower()
         cap: Capability | None = None
         upstream_model: str | None = None
@@ -560,7 +669,7 @@ def resolve(model: str | None, *, has_image: bool,
         elif low in _BY_NAME:
             cap = _BY_NAME[low]
         elif raw in UPSTREAM_MODEL_KEYS:
-            cap = _BY_NAME["t2i"]
+            cap = _BY_NAME["i2i"] if has_image else _BY_NAME["t2i"]
             upstream_model = raw
         elif norm in UNSUPPORTED_WEB_MODELS:
             # 面板上点得到、本服务**没登记** —— 给明确理由，不静默退化
@@ -570,7 +679,7 @@ def resolve(model: str | None, *, has_image: bool,
                 f"该系列实测 `ret=1006` 权益不足（见 docs/UPSTREAM.md §11）。"
                 f"要用图像生成请改用已登记的模型。{_hint()}", param="model")
         elif norm in UPSTREAM_MODEL_ALIASES:
-            cap = _BY_NAME["t2i"]
+            cap = _BY_NAME["i2i"] if has_image else _BY_NAME["t2i"]
             upstream_model = UPSTREAM_MODEL_ALIASES[norm]
         else:
             raise InvalidParameterError(
@@ -587,6 +696,13 @@ def resolve(model: str | None, *, has_image: bool,
         return cap, upstream_model
 
     # ---- 默认能力：只在无歧义时给（**在声明的媒体池内**推导）----
+    #: 🔴 走到这里且 `raw` 非空 ⇒ 调用方**显式写了一个占位名**（`seedream-9-9-ultra`
+    #: / `gpt-image-1` / `doubao-seedream-5-0-pro-260628` …），而我们把它按占位处理
+    #: ⇒ **兜底**。`raw` 为空则是"没写 model"的正常推导，**不算降级、不留痕**。
+    if raw:
+        _LAST_FALLBACK.clear()
+        _LAST_FALLBACK[raw] = "（按无歧义默认推导）"
+
     pool = "video" if video else "image"
     cands = [c for c in CAPABILITIES
              if c.media == pool
@@ -597,7 +713,10 @@ def resolve(model: str | None, *, has_image: bool,
         # 默认分支同样要过形态校验（含张数上限）—— 否则"省掉 model"就成了绕过校验的口子
         _check_shape(cands[0], raw=cands[0].api_id, has_image=has_image,
                      n_images=n_images)
-        return cands[0], (DEFAULT_UPSTREAM_MODEL if cands[0].name == "t2i" else None)
+        eff = (DEFAULT_UPSTREAM_MODEL if cands[0].name == "t2i" else None)
+        if raw and _LAST_FALLBACK:
+            _LAST_FALLBACK[raw] = eff or cands[0].api_id
+        return cands[0], eff
 
     kind = "带输入图" if has_image else "无输入图"
     if not cands:
