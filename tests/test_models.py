@@ -279,8 +279,10 @@ def test_catalog_exposes_ark_name_for_t2i_only():
         "Pro 的方舟名缺失（用户 2026-10-02 明确指定）"
     assert got["high_aes_general_v50"] == "doubao-seedream-5-0-260128", \
         "Lite 的方舟名缺失（用户 2026-10-02 明确指定）"
+    # 🔴 2026-10-03：i2i 也镜像 `upstream_models`（见
+    # `test_catalog_exposes_upstream_models_for_t2i_and_i2i`），其余能力不该有
     for m in catalog():
-        if m["id"] != "jimeng-t2i":
+        if m["id"] not in ("jimeng-t2i", "jimeng-i2i"):
             assert "upstream_models" not in m, m["id"]
 
 
@@ -560,20 +562,50 @@ def test_upstream_model_credits_table_does_not_drift():
         "Flash 2026-09-23 实跑实扣 3（2k/1 张）"
 
 
-def test_catalog_exposes_upstream_models_only_for_the_t2i_family():
-    """`upstream_models` 只挂文生图族 —— 别的能力没有"上游模型"这个维度。"""
-    from app.models import UPSTREAM_MODEL_CREDITS, UPSTREAM_MODEL_KEYS
+def test_catalog_exposes_upstream_models_for_t2i_and_i2i():
+    """`upstream_models` 挂在 **t2i 和 i2i** 两个能力上（2026-10-03 扩展）。
+
+    ⚠️ 语义变更：原先只挂 t2i —— 但 i2i 的调用方**同样需要**知道能传
+    哪些模型（比如 mj82），只挂 t2i 等于把 i2i 的可选项藏起来了。
+    其余能力（视频/审计…）仍然不该有这个维度。
+    """
+    from app.models import (UPSTREAM_MODEL_CREDITS, UPSTREAM_MODEL_KEYS,
+                            passable_model_strings)
 
     for m in catalog():
-        if m["id"] == "jimeng-t2i":
+        if m["id"] in ("jimeng-t2i", "jimeng-i2i"):
             assert [u["key"] for u in m["upstream_models"]] == list(UPSTREAM_MODEL_KEYS)
             assert all(u["web_name"] for u in m["upstream_models"]), \
                 "面板名不许为空 —— 空说明门禁没跟上"
-            #: 每项报的是**该模型**的实测价，不是能力级的 0
             for u in m["upstream_models"]:
                 assert u["credits_measured"] == UPSTREAM_MODEL_CREDITS[u["key"]], u
+                # 🔴 `pass_as` = 全部可传写法，必须包含 key 本身 + 指向它的每个别名
+                expect = passable_model_strings(u["key"])
+                assert u["pass_as"] == expect, u["key"]
+                assert u["key"] in u["pass_as"]
+            # t2i 与 i2i 的清单**内容一致**（同一批上游模型）
+            t2i = next(x for x in catalog() if x["id"] == "jimeng-t2i")
+            assert m["upstream_models"] == t2i["upstream_models"], \
+                "两个能力暴露的上游模型清单应当一致"
         else:
             assert "upstream_models" not in m, f"{m['id']} 不该有 upstream_models"
+
+
+def test_pass_as_includes_all_alias_spellings():
+    """🔴 `pass_as` 必须把**所有写法**都列出来 —— 包括 `mj-v8.2` 归一后的等价形式。
+
+    背景（2026-10-03 用户实测问句"model=mj-v8.2 可以这样传吗"）：
+    归一规则把 `.`/`_`/空格折叠成 `-`，所以 `mj-v8.2` 能命中别名表里的
+    `mj-v8-2` —— 但**清单上完全看不出来**，调用方只能猜。
+    现在目录里明示全部可传写法。
+    """
+    from app.models import passable_model_strings
+
+    got = passable_model_strings("jm_image_model_yc_mj82")
+    for spelling in ("jm_image_model_yc_mj82", "mj-v8-2", "mj82", "mj-v82"):
+        assert spelling in got, f"{spelling} 不在 pass_as 里: {got}"
+    # 归一等价：`mj-v8.2` 归一后 = `mj-v8-2` ⇒ 传它必然命中清单里的那一项
+    assert "mj-v8-2" in got
 
 
 def test_image_required_capability_without_image_is_400_before_upstream():

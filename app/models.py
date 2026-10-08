@@ -712,6 +712,23 @@ def upstream_supports_blend(upstream_key: str) -> bool:
 _BLEND_CAPABLE: dict[str, bool] = {}
 
 
+def passable_model_strings(key: str) -> list[str]:
+    """某个上游模型可用的**全部 `model` 传法**（目录发现用）。
+
+    含三部分：① key 本身（白名单 key 可原样传）；② 方舟名（如有）；
+    ③ 别名表里指向它的所有别名（`mj-v8-2`/`mj82`/`图片美学模型 8.2`…）。
+    顺序刻意：key → ark → 别名（key 最"权威"，ark 最"官方"，别名最短）。
+    """
+    out = [key]
+    ark = UPSTREAM_ARK_NAMES.get(key)
+    if ark:
+        out.append(ark)
+    for alias, target in UPSTREAM_MODEL_ALIASES.items():
+        if target == key and alias not in out:
+            out.append(alias)
+    return out
+
+
 def set_blend_capable(mapping: dict[str, bool]) -> None:
     """回填"哪些上游模型支持 blend"（由 Service 调，测试可直接注入）。"""
     _BLEND_CAPABLE.clear()
@@ -913,13 +930,19 @@ def catalog() -> list[dict]:
             "notes": c.notes,
             "internal_id": c.api_id,
         }
-        if c.name == _UPSTREAM_FAMILY:
+        if c.name in (_UPSTREAM_FAMILY, "i2i"):
             #: 🔴 `ark_name` = **可原样当 `model` 传**的方舟模型名（2026-10-02）。
             #: 没有方舟名的档位给 `None`（**不是空串**）—— 空串会被调用方
             #: 当成"有个名字叫空"，`None` 才能表达"这一档没有方舟对应名"。
+            #: 🔴 2026-10-03 两处扩展：① 每项加 `pass_as`（**全部可传写法**，
+            #:    含别名 —— 此前调用方只能猜"该传哪个字符串"，实测 `mj-v8.2`
+            #:    这类带点的写法也能中，但清单里完全看不出来）；
+            #:    ② i2i **同样镜像**这份清单（此前只有 t2i 有 ⇒ i2i 的调用方
+            #:    无从发现可传哪些模型，比如 mj82）。
             item["upstream_models"] = [
                 {"key": k, "web_name": UPSTREAM_WEB_NAMES.get(k, ""),
                  "ark_name": UPSTREAM_ARK_NAMES.get(k),
+                 "pass_as": passable_model_strings(k),
                  #: 🔴 用**按模型**的实测价，不是能力级的值 —— 见
                  #: `UPSTREAM_MODEL_CREDITS` 的注释（能力级是 Lite 口径）
                  "credits_measured": UPSTREAM_MODEL_CREDITS.get(k)}
