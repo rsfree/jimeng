@@ -341,10 +341,13 @@ class Service:
         # 🔴 2026-10-08（用户口径"不从环境变量取 sessionid，是用 bearer 鉴权"）：
         # **不再**用 `JIMENG_SESSIONID` 建默认客户端 —— 凭据一律由**每个请求的
         # Bearer** 带来（`bundle_for()`按 sessionid 现建/取缓存）。
-        # 🔴 因此 `self.client` 现在**只在测试注入时才有值**，生产恒为 None；
-        # 各处`if self.client is None` 的判断依然成立，但语义从
-        # "服务没配凭据"变成了"**本次请求没带凭据**" —— 而后者在受理时
-        # 就已被`_bearer` 的 401挡住，不会走到这里。
+        # 🔴 因此 `self.client` 现在**只在测试注入时才有值**，生产恒为 None。
+        # ⚠️⚠️ 由此产生的陷阱（2026-10-03 实踩）：所有 `if self.client is None`
+        # 的守卫原先隐含"None = 服务没配凭据"，现在**语义反了** ——
+        # 生产常态就是 None！已逐个重审并修正：`poll_many`（每 tick 直接
+        # return ⇒ 任务永不推进）、`_run_audit`（audit 能力永远失败）。
+        # 🔴 教训：删掉"用 env 建默认 client"时，必须把**所有**相关守卫
+        # 一起重新审一遍，否则会留下"静默失效"的坑。
         if self.client is not None and self.uploader is None:
             self.uploader = ImageXUploader(self.client)
         #: VOD 上传（视频/音频 → vid），与 ImageX **共享同一把 STS**。
@@ -1257,8 +1260,20 @@ class Service:
         （协调器每 tick 都 `list_by_status` 重读，所以生产路径是对的；
         但这确实是个陷阱，本仓的基准脚本第一版就踩了。）
         """
-        if self.client is None or not recs:
+        if not recs:
             return {"polled": 0, "expired": 0, "skipped": 0}
+        # 🔴 2026-10-03 **修一个自造的真bug**：这里原先是
+        # `if self.client is None or not recs: return ...`
+        # 而透传模式下**生产的 `self.client` 恒为 None**（没有 env 兜底、
+        # 又没注入）⇒ 整个轮询**每 tick 直接 return** ⇒
+        # 任务永远停在 `in_progress`、`updated_at` 从不刷新，
+        # 而**日志里一条报错都没有**（协调器 ticks 正常、/readyz ready）。
+        # 实测症状：生图请求挂到超时，但手动调`fetch_many` 却能拿到
+        # `status=50 success` ⇒ "取结果"没问题，是"没人去取"。
+        # ⚠️ 教训：删掉"用env 建默认 client"时，必须把所有
+        # `self.client is None` 的守卫一起重新审一遍 ——
+        # 它们原先隐含"None = 服务没配凭据"，现在语义已变成
+        # "None = 本次请求没带凭据（生产常态）"。
         now = time.time()
         asked: list[TaskRecord] = []
         expired = 0
@@ -1687,10 +1702,17 @@ class Service:
           并把该素材记入负缓存 ⇒ 同一张图再发直接拒。
         · **预审接口探不通** ⇒ fail-open 放行（留痕），按"通过"处理。
         """
-        if self.client is None:
+        # 🔴 2026-10-03 同上：原先 `if self.client is None: fail(...)`，
+        # 而 `_run_audit` 跑在**受理路径**上（此时还没推凭据上下文）
+        # ⇒ 生产恒为 None ⇒ audit 能力**永远失败**。
+        # 改成按本任务的 sessionid 取一整套（没有才 fail）。
+        a_client, a_uploader, _a_vod, _a_cfg = self.bundle_for(
+            self.sessionid_of(rec))
+        if a_client is None or a_uploader is None:
             self._fail(rec, UpstreamUnavailableError(
-                "未配置上游即梦凭据，无法预审", upstream="jimeng"))
+                "本次任务没有可用的上游凭据，无法预审", upstream="jimeng"))
             return
+        self._push_cred(a_client, a_uploader, _a_vod, _a_cfg, rec)
         try:
             blobs = [self._load_media_ref(r) for r in (rec.image_refs or [])]
             uris = [self._transfer_one(b)[0] for b in blobs]
@@ -1705,6 +1727,10 @@ class Service:
                     f"⚠️ 素材预审未完成（{type(e).__name__}）⇒ 按**通过**处理；"
                     f"本次**未出图**（预审能力本就不出图），无法判定素材是否合规。"])
             return
+        finally:
+            # 🔴 必须配对弹出，否则凭据上下文**泄漏**到后续请求
+            #（下一个任务会拿到上一个人的 client/uploader）。
+            self._pop_cred()
         rejected = [r for r in results
                     if isinstance(r, dict) and r.get("audit_decision") == 2]
         if not rejected:

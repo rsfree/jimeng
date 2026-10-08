@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 
 # ---------------------------------------------------------------------------
@@ -144,3 +145,106 @@ def test_task_is_recorded_with_the_callers_own_credential(client):
     assert body.get("task_id") == tid, (
         f"用同一 sessionid 却查不到自己的任务：{body}")
     assert body.get("status") in ("queued", "in_progress", "success")
+
+
+# ---------------------------------------------------------------------------
+# 🔴🔴 防"静默失效"：生产 self.client 恒为 None 时的两个坑
+# ---------------------------------------------------------------------------
+
+def test_poll_many_does_not_early_return_when_self_client_is_none(
+        settings, store, fake_jimeng, fake_uploader):
+    """🔴🔴 `poll_many` **不能**因为 `self.client is None` 就整段 return。
+
+    这是 2026-10-03 **自造的真 bug**（透传改造引入）：
+    删掉"用 env 建默认 client"之后，生产 `self.client` **恒为 None**，
+    而 `poll_many` 第一行原是 `if self.client is None: return`
+    ⇒ **每个 tick 直接返回** ⇒ 任务永远停在 `in_progress`、
+    `updated_at` 从不刷新，**日志里一条报错都没有**
+    （协调器 ticks 正常、`/readyz` ready、`/stats` 全健康）。
+
+    实测症状极具误导性：生图请求挂到超时，而**手动调 `fetch_many`
+    却能拿到 `status=50 success`** ⇒ 看起来像"取结果坏了"，
+    实际是"**没人去取**"。
+
+    这条用未注入 client 的 Service 复现（生产形态）。
+    """
+    from app.service import Service
+    from app.store import TaskRecord
+
+    svc = Service(settings, store=store, client=None, uploader=None, cfg=None)
+    assert svc.client is None, "本用例要复现生产的 self.client is None"
+
+    rec = TaskRecord(task_id="jimeng_polltest", credential_id="c1",
+                     upstream_sessionid="522ceab845a313502b72f5067534d191",
+                     model="jimeng-t2i", cap_key="jimeng:t2i",
+                     status="in_progress", prompt="p",
+                     upstream_submit_id="upstream-1",
+                     # ⚠️ 年龄要**小于** `task_timeout`（否则先被看门狗判死），
+                     # 但**大于** `poll_grace` + `poll_interval`（否则进不了轮询）。
+                     started_at=int(time.time()) - 5,
+                     updated_at=int(time.time()) - 5)
+    store.put(rec)
+
+    # 给池子塞一个能用的 client（模拟"凭据由请求带来"）
+    fake_cfg = type("_C", (), {"snapshot": lambda self: None,
+                               "count_options": lambda self, k: None,
+                               "resolution_map": lambda self, k: {}})()
+    svc._cred_pool["522ceab845a313502b72f5067534d191"] = (
+        fake_jimeng, fake_uploader, fake_uploader, fake_cfg)
+    from app.upstream.jimeng.client import TaskState
+    fake_jimeng.states = [TaskState(
+        submit_id="upstream-1", status=50, status_name="success",
+        finished=True, failed=False,
+        images=[type("_I", (), {"url": "https://cdn/x.png", "width": 2048,
+                                 "height": 2048, "format": "png",
+                                 "note": "", "item_id": "i1", "vid": ""})()])]
+
+    out = svc.poll_many([rec])
+    assert out["polled"] == 1, (
+        f"poll_many 没轮询（返回 {out}）—— `self.client is None` "
+        f"让它整段return 了，这是 2026-10-03 的线上事故")
+    assert store.get(rec.task_id).status == "success", (
+        "轮询到了却没推进到终态")
+
+
+def test_audit_capability_does_not_fail_when_self_client_is_none(
+        settings, store, fake_jimeng, fake_uploader):
+    """🔴 同理：`_run_audit` 也不能因 `self.client is None` 就判失败。
+
+    它跑在**受理路径**上（还没推凭据上下文）⇒ 生产恒为 None
+    ⇒ `jimeng-audit` 能力会**永远失败**。
+    """
+    from app.service import Service
+    from app.store import TaskRecord
+
+    svc = Service(settings, store=store, client=None, uploader=None, cfg=None)
+    assert svc.client is None
+    svc._cred_pool["522ceab845a313502b72f5067534d191"] = (
+        fake_jimeng, fake_uploader, fake_uploader, None)
+    fake_jimeng.audit_result = ({"audit_decision": 1},)
+
+    rec = TaskRecord(task_id="jimeng_audittest", credential_id="c1",
+                     upstream_sessionid="522ceab845a313502b72f5067534d191",
+                     model="jimeng-audit", cap_key="jimeng:audit",
+                     status="queued", prompt="",
+                     image_refs=["data:image/png;base64,iVBORw0KGgo="])
+    store.put(rec)
+    svc._run_audit(rec)
+    assert store.get(rec.task_id).status == "success", (
+        "audit 能力在生产形态下被误判为『没凭据』⇒ 永远失败")
+
+
+def test_credential_context_is_always_popped(settings, store, fake_jimeng,
+                                             fake_uploader):
+    """🔴 `_push_cred` / `_pop_cred` 必须**配对** —— 泄漏会让下个任务
+    拿到**上一个人**的 client/uploader（静默串号，且极难发现）。"""
+    import inspect
+
+    from app.service import Service
+
+    src = inspect.getsource(Service)
+    pushes = src.count("self._push_cred(")
+    pops = src.count("self._pop_cred()")
+    assert pushes == pops, (
+        f"_push_cred({pushes}) 与 _pop_cred({pops}) 数量不等"
+        f" ⇒ 有路径泄漏凭据上下文")
