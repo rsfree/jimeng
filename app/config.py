@@ -68,8 +68,6 @@ def _csv(key: str) -> tuple[str, ...]:
 @dataclass
 class Settings:
     # ------------------------------------------------------------ 上游凭据
-    #: 即梦唯一的硬前提凭据（cookie 里的 `sessionid`）。空 = 未配置。
-    jimeng_sessionid: str = ""
     jimeng_cookie: str = ""
     jimeng_workspace_id: int | None = None
     jimeng_base_url: str = "https://jimeng.jianying.com"
@@ -182,8 +180,24 @@ class Settings:
 
     @property
     def upstream_configured(self) -> bool:
-        """上游凭据是否可用。false 时服务仍可启动（/healthz 200），但不受理任务。"""
-        return bool(self.jimeng_sessionid or self.jimeng_cookie)
+        """服务是否具备"受理并推进任务"的能力。
+
+        🔴 2026-10-08 语义变更（用户口径"**不从环境变量取 sessionid，
+        是用 bearer <key> 鉴权**"）：**恒为 True**。
+
+        为什么必须恒真 —— 原来它判`bool(JIMENG_SESSIONID or COOKIE)`，
+        而这个开关卡着**三处**要害：
+        · `coordinator.tick()` 里`if not upstream_configured: return`
+          ⇒ env 空着**协调器整轮不推进**，任务永远 queued；
+        · `Service.create` 受理时直接抛 `capability_unavailable`；
+        · 启动自检还会报"JIMENG_SESSIONID 未配置"。
+
+        透传后凭据由**每个请求的 Bearer** 带来，服务自己不需要持有⇒
+        用 env 是否为空来判断"能不能干活"是**错的**（env 空 ≠ 不能干活）。
+        真实可用性现在体现在**派发时**：拿不到凭据会报
+        `upstream_not_configured`，那才是准确的位置。
+        """
+        return True
 
     @property
     def auth_enabled(self) -> bool:
@@ -209,7 +223,6 @@ class Settings:
     def from_env(cls) -> "Settings":
         ws_raw = _s("JIMENG_WORKSPACE_ID")
         st = cls(
-            jimeng_sessionid=_s("JIMENG_SESSIONID"),
             jimeng_cookie=_s("JIMENG_COOKIE"),
             jimeng_workspace_id=int(ws_raw) if ws_raw else None,
             jimeng_base_url=_s("JIMENG_BASE_URL", "https://jimeng.jianying.com"),
@@ -274,10 +287,7 @@ class Settings:
             self.startup_warnings.append(
                 "API_KEYS 为空 —— 对外鉴权已关闭。仅限内网/联调使用："
                 "任何能访问本端口的人都能消耗你的即梦积分。")
-        if not self.upstream_configured:
-            self.startup_warnings.append(
-                "JIMENG_SESSIONID 未配置 —— 服务可启动，但 POST /async/v1/images/generations "
-                "会返回 503（capability_unavailable）。")
+
         if self.jm_concurrency > 4:
             self.startup_warnings.append(
                 f"JM_CONCURRENCY={self.jm_concurrency} 超过实测验证过的上限（4）。"

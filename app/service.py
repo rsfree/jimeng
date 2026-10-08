@@ -183,10 +183,14 @@ def to_adapter_error(exc: BaseException) -> AdapterError:
     if isinstance(exc, AdapterError):
         return exc
     if isinstance(exc, JimengAuthError):
-        # 上游凭据失效是**部署问题**，不是调用方的参数错误 ⇒ 503 而非 401
+        # 上游凭据失效是**调用方**的问题（他带来的 sessionid 过期了）
+        # ⇒ 503（不是 401：401 会被理解成"你没带凭据"，而他带了，只是失效了）
+        # 🔴 2026-10-03 文案改：透传后**服务不持有凭据**，所以"换凭据"
+        # 是调用方自己的动作，**不再**说"请联系服务方更新 JIMENG_SESSIONID"
+        # （那会把他引到错的路上 —— 服务根本没这项配置）。
         return CapabilityUnavailableError(
-            "上游即梦凭据（sessionid）失效或已过期，本服务当前无法受理任务；"
-            "请联系服务方更新 JIMENG_SESSIONID。",
+            "你提供的即梦 sessionid 已失效或过期（上游返回登录错误）��"
+            "请用新的 sessionid 重试 —— 换sessionid 即可，服务无需任何改动。",
             upstream="jimeng")
     if isinstance(exc, JimengRateLimitError):
         return UpstreamRateLimitError(str(exc), upstream="jimeng")
@@ -334,16 +338,13 @@ class Service:
         #: 🔴 外部注入（测试）标记：注入的 client 对**所有** sessionid 生效，
         #: 见 `bundle_for`。生产为False（client 由本类按 sessionid 自建）。
         self._client_injected = client is not None
-        if settings.upstream_configured and self.client is None:
-            self.client = JimengClient(
-                sessionid=settings.jimeng_sessionid,
-                cookie=settings.jimeng_cookie,
-                base=settings.jimeng_base_url,
-                workspace_id=settings.jimeng_workspace_id,
-                poll_interval=settings.jimeng_poll_interval,
-                capture_upstream=settings.otel_capture_upstream,
-            )
-            self.cfg = ModelConfigCache(self.client)
+        # 🔴 2026-10-08（用户口径"不从环境变量取 sessionid，是用 bearer 鉴权"）：
+        # **不再**用 `JIMENG_SESSIONID` 建默认客户端 —— 凭据一律由**每个请求的
+        # Bearer** 带来（`bundle_for()`按 sessionid 现建/取缓存）。
+        # 🔴 因此 `self.client` 现在**只在测试注入时才有值**，生产恒为 None；
+        # 各处`if self.client is None` 的判断依然成立，但语义从
+        # "服务没配凭据"变成了"**本次请求没带凭据**" —— 而后者在受理时
+        # 就已被`_bearer` 的 401挡住，不会走到这里。
         if self.client is not None and self.uploader is None:
             self.uploader = ImageXUploader(self.client)
         #: VOD 上传（视频/音频 → vid），与 ImageX **共享同一把 STS**。
@@ -565,10 +566,13 @@ class Service:
                     f"参数 {k}={body[k]!r} 本服务不支持（即梦这条链路没有对应能力），已忽略；"
                     f"不要按它的语义预期结果。")
 
-        if not self.settings.upstream_configured:
-            raise CapabilityUnavailableError(
-                "本服务未配置上游即梦凭据（JIMENG_SESSIONID），无法受理任务。",
-                upstream="jimeng")
+        # 🔴 2026-10-08：原先这里有一道 `if not upstream_configured: raise
+        # capability_unavailable`（"本服务未配置上游即梦凭据（JIMENG_SESSIONID）"），
+        # **已删除** —— 透传后凭据由**每个请求的 Bearer** 带来，
+        # 用服务自己有没有配 env 来决定"能不能受理"是错的：
+        # · env 空 ≠ 不能干活（那会让整服务404/503，而 Bearer 是对的）；
+        # · 真缺凭据在**鉴权层**就已401（`require_key` 要求非空 Bearer）。
+        # 真实失败点已下移到派发时（`upstream_not_configured`），那才准确。
 
         image = self._validate_image(body.get("image"))
         prompt = body.get("prompt")
@@ -1155,7 +1159,8 @@ class Service:
             self.bundle_for(self.sessionid_of(rec))
         if cred_client is None or cred_uploader is None:
             self._fail(rec, CapabilityUnavailableError(
-                "服务未配置上游客户端（JIMENG_SESSIONID 缺失）", upstream="jimeng"))
+                "本次任务没有可用的上游凭据（Bearer 未带 sessionid）",
+                upstream="jimeng"))
             return
         # 让下游（_prepare_input_images / _submit / _pre_audit_materials）
         # 继续用 `self.client` 这种老写法，不必逐个改成参数 ——
@@ -1171,7 +1176,8 @@ class Service:
         """`dispatch` 的真正实现（凭据已在 `dispatch` 里推入上下文）。"""
         if self.client is None or self.uploader is None:
             self._fail(rec, CapabilityUnavailableError(
-                "服务未配置上游客户端（JIMENG_SESSIONID 缺失）", upstream="jimeng"))
+                "本次任务没有可用的上游凭据（Bearer 未带 sessionid）",
+                upstream="jimeng"))
             return
         # 闸门：节奏 + 冷却。**在这之前不发任何请求**
         try:

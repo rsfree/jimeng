@@ -365,8 +365,9 @@ class FakeConfigCache:
 
 @pytest.fixture
 def settings(db_dsn) -> Settings:
+    # 🔴 2026-10-03 透传：**不再有** jimeng_sessionid 配置项 ——
+    # 凭据由每个请求的 Bearer 带来，服务自己不需要持有。
     return Settings(
-        jimeng_sessionid=SESSION,
         # 两把 Key：用来验证"跨凭证读不到别人的任务"
         api_keys=(KEY_A, KEY_B),
         jm_concurrency=1,

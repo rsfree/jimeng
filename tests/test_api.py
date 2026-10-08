@@ -434,28 +434,47 @@ def test_healthz_is_dependency_free_and_needs_no_auth(client):
     assert r.status_code == 200 and r.json() == {"status": "ok"}
 
 
-def test_readyz_reports_upstream_configuration(settings, monkeypatch):
+def test_readyz_does_not_depend_on_env_sessionid(settings, monkeypatch):
+    """🔴 2026-10-08 语义变更：**env 里没有 sessionid 也必须 ready**。
+
+    透传后凭据由**每个请求的 Bearer** 带来，服务自己不需要持有。
+    原先`/readyz` 判 `bool(JIMENG_SESSIONID or COOKIE)` ⇒ env 空就 503，
+    而**Bearer 是对的**也没用—— 那会让"没配 env 的正确部署"直接不可用。
+
+    ⚠️ 这条替代了原来的 `test_readyz_reports_upstream_configuration`
+    （那个语义已随透传作废）。
+    """
     from fastapi.testclient import TestClient
 
     from app import main as main_mod
     from app.service import Service
 
-    blank = settings.replace(jimeng_sessionid="", jimeng_cookie="")
+    blank = settings.replace(jimeng_cookie="")   # 无 sessionid 配置项了
     monkeypatch.setattr(main_mod, "Service", lambda s: Service(s))
     app = main_mod.create_app(blank)
     with TestClient(app) as c:
-        assert c.get("/readyz").status_code == 503
-        body = c.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"},
-                      headers=AUTH).json()
-        assert body["error"]["code"] == "upstream_not_configured"
+        assert c.get("/readyz").status_code == 200, (
+            "env 无 sessionid 不该让服务报 not-ready")
+        # 受理也不该被"服务没配 env"拦住
+        r = c.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"},
+                   headers=AUTH)
+        assert r.status_code == 202, r.text
 
 
-def test_unconfigured_upstream_is_503_not_401(client_factory):
-    """上游凭据缺失是**部署问题**，不是调用方的身份问题 ⇒ 503 而非 401。"""
-    c = client_factory(jimeng_sessionid="", jimeng_cookie="")
-    r = c.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"}, headers=AUTH)
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "upstream_not_configured"
+
+def test_missing_credential_is_401_not_503(client_factory):
+    """🔴 缺凭据是**调用方的身份问题** ⇒ 401（不是部署问题 503）。
+
+    2026-10-08 语义变更：原先"env 没配 sessionid"⇒ 503；
+    透传后**服务不持有凭据**，所以"缺凭据"只可能是**请求没带 Bearer** ⇒ 401。
+    ⚠️ 这条替代了 `test_unconfigured_upstream_is_503_not_401`（语义已作废）。
+    """
+    c = client_factory()
+    r = c.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"})
+    assert r.status_code == 401, r.text
+    assert r.json()["error"]["code"] in ("missing_api_key", "invalid_api_key",
+                                         "authentication_error")
+
 
 
 # ---------------------------------------------------------------------------

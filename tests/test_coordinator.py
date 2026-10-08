@@ -521,8 +521,16 @@ def test_risk_error_enters_cooldown_and_fails(client, client_state, fake_jimeng,
     assert len(fake_jimeng.calls) == before, "冷却期内不该再调上游"
 
 
-def test_auth_error_is_a_deployment_problem_not_the_callers(client, client_state,
-                                                            fake_jimeng, service):
+def test_auth_error_tells_the_caller_to_use_a_new_sessionid(
+        client, client_state, fake_jimeng, service):
+    """🔴 上游凭据失效 ⇒ 提示**调用方换自己的 sessionid**（不是"联系服务方"）。
+
+    2026-10-03 语义变更：透传后凭据由**每个请求的 Bearer** 带来，
+    服务**不持有**任何凭据 ⇒ "sessionid 过期"是**调用方自己的事**。
+    原先文案"请联系服务方更新 JIMENG_SESSIONID"会把人引到错的路上
+    —— 服务根本没这项配置了（字段已删）。
+    ⚠️ 这条替代了 `test_auth_error_is_a_deployment_problem_not_the_callers`。
+    """
     from app.upstream.jimeng import JimengAuthError
 
     fake_jimeng.fail_submit = JimengAuthError("session expired", code=1015)
@@ -530,13 +538,12 @@ def test_auth_error_is_a_deployment_problem_not_the_callers(client, client_state
     client_state.coordinator.tick()
     body = client.get(f"{BASE}/{tid}", headers=AUTH).json()
     assert body["status"] == "failure"
-    # 上游凭据失效是**部署问题** ⇒ 提示文案要指导"联系服务方"，而不是让调用方改参数
-    assert "JIMENG_SESSIONID" in body["error"]["message"]
+    msg = body["error"]["message"]
+    assert "sessionid" in msg, msg
+    assert "JIMENG_SESSIONID" not in msg, (
+        "服务已不持有凭据，再让调用方去改服务配置是**误导**")
+    assert "重试" in msg, "要告诉调用方下一步动作（换 sessionid 重试）"
 
-
-# ---------------------------------------------------------------------------
-# 并发上限：按**库计数**，不是进程内信号量
-# ---------------------------------------------------------------------------
 
 
 def test_concurrency_limit_is_enforced_from_the_store(client, client_state,
@@ -639,7 +646,7 @@ def test_coordinator_skips_when_upstream_not_configured(settings, store,
     from app.service import Service
     from app.coordinator import Coordinator
 
-    blank = settings.replace(jimeng_sessionid="", jimeng_cookie="")
+    blank = settings.replace(jimeng_cookie="")
     svc = Service(blank, store=store, client=fake_jimeng,
                   uploader=fake_uploader, cfg=None)
     co = Coordinator(svc, blank, owner="x")
@@ -689,7 +696,7 @@ def test_prewarm_fetches_model_config_and_upload_token_once(service, settings,
     """
     from app.coordinator import Coordinator
 
-    svc = settings.replace(jimeng_sessionid="s", jimeng_cookie="")
+    svc = settings
     obj = Service(svc, store=service.store, client=fake_jimeng,
                   uploader=fake_jimeng, cfg=None)
     # 用替身记账，避免真的构造上游往返
@@ -716,7 +723,7 @@ def test_prewarm_failure_never_breaks_startup(service, settings):
     """预热是**优化**，绝不能成为启动的前提条件 —— 失败只告警。"""
     from app.coordinator import Coordinator
 
-    svc = settings.replace(jimeng_sessionid="s", jimeng_cookie="")
+    svc = settings
 
     class _Boom:
         def snapshot(self):
@@ -730,7 +737,7 @@ def test_prewarm_failure_never_breaks_startup(service, settings):
     Coordinator(obj, svc, owner="x")._prewarm()      # 不该抛
 
     # 没配置上游时整段跳过（省得在无凭据部署里空跑）
-    blank = settings.replace(jimeng_sessionid="", jimeng_cookie="")
+    blank = settings.replace(jimeng_cookie="")
     obj2 = Service(blank, store=service.store, client=None, uploader=None, cfg=None)
     Coordinator(obj2, blank, owner="x")._prewarm()   # 也不该抛
 

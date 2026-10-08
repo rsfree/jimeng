@@ -88,10 +88,11 @@ class Coordinator:
         OBS.info("coordinator started", owner=self.owner,
                  tick_s=self.settings.coordinator_tick,
                  concurrency=self.settings.jm_concurrency)
-        # 未配置上游时协调器空转没意义 —— 说清楚，别让人对着"任务不动"猜
-        if not self.settings.upstream_configured:
-            OBS.warning("coordinator idle",
-                        reason="未配置 JIMENG_SESSIONID，任务不会被推进")
+        # 🔴 2026-10-03：原先这里会因"未配置 JIMENG_SESSIONID"告警并说
+        # "任务不会被推进"，**已删除** —— 透传后服务不持有凭据，
+        # `upstream_configured` 恒真，这个分支永远走不到；
+        # 而留着它只会让运维以为"不配 env 就跑不了"（其实每个请求
+        # 自己带 Bearer）。真实失败点已下移到派发时（upstream_not_configured）。
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()

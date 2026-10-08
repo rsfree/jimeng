@@ -67,13 +67,36 @@ def test_ruff_correctness_gate_passes():
 def _settings_reads() -> set[str]:
     """收集 app/ 里所有配置读取点。
 
-    两种写法都要认：`settings.X` 与 `self.settings.X`（后者是本仓协调器/服务的写法）。
-    ⇒ 这条门禁也是"为什么 `__main__` 里的局部变量必须叫 `settings`"的原因：
-    叫 `_s` 会让 `host`/`port` 被误判成没人读的死旋钮。
+    认的写法：`settings.X` / `self.settings.X`，**以及任何 `<别名>.X`**
+    —— 形如 `st = self.settings` 之后 `st.jimeng_base_url`。
+    ⚠️ 2026-10-03 补：原先只认前两种，把 `bundle_for()` 里的 `st = self.settings`
+    + `st.jimeng_base_url` 误判成"没人读"⇒ 假报5 个死旋钮。
+    🔴 教训：这类"静态扫描有没有覆盖某种写法"的门禁，**自己也会假报**；
+    报"没人读"时要先确认是不是写法没被认，别急着删配置。
     """
     found: set[str] = set()
     for path in APP.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        # 🔴 2026-10-03：认`st = self.settings` 这类**局部别名**。
+        # ⚠️ **两次踩坑**（都是"按名字全局猜"惹的）：
+        #  ① 只认 `settings.X`/`self.settings.X` ⇒ 把 `st.jimeng_base_url`
+        #     误判成死旋钮（假报 5 个）；
+        #  ② "收集全文件的 settings 别名、再全局套用" ⇒ `poll_many` 里有
+        #     一个**同名**局部变量 `st`（TaskState），于是 `st.status`/
+        #     `st.images` 全被当成配置读取（假报十几个）。
+        # ⇒ 正确做法：**别名只在其所属函数体内生效**（成对处理）——
+        # 先在函数 A 里找到别名，再只在函数 A 里用这个别名。
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            aliases = _settings_aliases_in(func)
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                base = node.value
+                if isinstance(base, ast.Name) and base.id in aliases:
+                    found.add(node.attr)
+        # 模块层的 `settings.X` / `self.settings.X`
         for node in ast.walk(tree):
             if not isinstance(node, ast.Attribute):
                 continue
@@ -83,6 +106,20 @@ def _settings_reads() -> set[str]:
             elif isinstance(base, ast.Attribute) and base.attr == "settings":
                 found.add(node.attr)
     return found
+
+
+def _settings_aliases_in(func: ast.AST) -> set[str]:
+    """函数体内"指向 settings 的局部别名"（`st = self.settings`）。"""
+    out: set[str] = {"settings"}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign) \
+                or not isinstance(node.value, ast.Attribute) \
+                or node.value.attr != "settings":
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name):
+                out.add(tgt.id)
+    return out
 
 
 def _settings_self_reads() -> set[str]:
@@ -130,26 +167,37 @@ def test_no_dead_settings_knobs():
 
 
 def test_settings_constructs_and_properties_are_readable():
-    """默认构造 + 三个派生属性可读（`upstream_configured`/`auth_enabled`/`db_target`）。"""
+    """默认构造 + 派生属性可读。
+
+    🔴 2026-10-08：`upstream_configured` 语义已变—— 透传后服务**不持有**
+    凭据（由每个请求的 Bearer 带来），所以它**恒为 True**，
+    不再判`bool(JIMENG_SESSIONID or COOKIE)`。
+    真实可用性体现在**派发时**（`upstream_not_configured`）。
+    """
     s = Settings()
-    assert s.upstream_configured is False
+    assert s.upstream_configured is True, (
+        "透传模式下服务不持有凭据 ⇒ 这个开关恒真（env 空 ≠ 不能干活）")
     assert s.auth_enabled is False
     assert s.db_target.startswith("postgresql")
 
 
-def test_startup_warnings_surface_the_two_dangerous_defaults(monkeypatch):
-    """未配上游凭据 / 未开鉴权都必须给出启动告警。
 
-    这两件事都能让服务"起得来但很危险"：前者接了活必然失败，后者等于把
-    计费的生成能力对所有人开放。`startup_warnings` 只在 `from_env()` 里填充
-    （仓促改配置的人正是走环境变量那条路）。
+def test_startup_warnings_surface_the_dangerous_default(monkeypatch):
+    """未开鉴权必须给启动告警（"关掉鉴权"是危险默认）。
+
+    ⚠️ 2026-10-08：原先这里还断言"未配 JIMENG_SESSIONID 要告警"，
+    那条已随透传作废 —— 服务不再持有凭据，"env 没配 sessionid"
+    **不是**危险状态（每个请求自己带 Bearer），报出来只会**误导运维**
+    （让人以为必须去配一个根本没人用的变量）。
     """
     for key in ("JIMENG_SESSIONID", "JIMENG_COOKIE", "API_KEYS"):
         monkeypatch.delenv(key, raising=False)
     s = Settings.from_env()
     text = " ".join(s.startup_warnings)
-    assert "JIMENG_SESSIONID" in text, "未配上游凭据要告警"
     assert "API_KEYS" in text or "鉴权" in text, "未开鉴权要告警"
+    assert "JIMENG_SESSIONID" not in text, (
+        "env 无 sessionid 已不是问题（透传），再报就是**误导性假告警**")
+
 
 
 def test_from_env_reads_every_declared_knob(monkeypatch):
