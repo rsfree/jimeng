@@ -73,7 +73,9 @@ class Settings:
     jimeng_base_url: str = "https://jimeng.jianying.com"
 
     # ------------------------------------------------------------ 对外鉴权
-    #: 空元组 = 关闭鉴权（仅限内网/联调；启动时会打 WARNING）。
+    #:🔴 2026-10-03 起**不再参与鉴权**（sessionid 透传：Bearer 就是凭据）。
+    #: 保留字段仅为不破坏现有 `.env`；这里刻意**加一处读取**（见
+    #: `auth_enabled` 的注释）以免它变成"看起来能配、其实没读"的假配置。
     api_keys: tuple[str, ...] = ()
 
     # ------------------------------------------------------------ 节奏闸门
@@ -201,7 +203,20 @@ class Settings:
 
     @property
     def auth_enabled(self) -> bool:
-        return bool(self.api_keys)
+        """是否启用对外鉴权。**恒为 True**（2026-10-03sessionid 透传）。
+
+        🔴 实踩的坑：原先是 `bool(self.api_keys)`。我在清理线上 `.env` 时把
+        `API_KEYS` 整行注释掉了 ⇒ 它变False ⇒ `require_key` 走
+        `credential_of(None)` ⇒ **Bearer 被完全忽略**、所有任务以
+        `anonymous` 落库 ⇒ 跨凭据隔离失效（谁都能查谁的任务）。
+        而现象是"生图请求挂住到超时"，**日志里没有任何报错**，
+        协调器 ticks 也正常 ⇒ 极难定位。
+
+        为什么恒真：透传模式下"鉴权"**已由 Bearer 本身承担**
+        （它就是上游凭据），不需要任何额外配置项决定是否开启。
+        `api_keys` 字段保留仅为不破坏现有 `.env`（它已不参与鉴权）。
+        """
+        return True
 
     @property
     def db_target(self) -> str:
@@ -283,10 +298,16 @@ class Settings:
             raise ConfigError("SYNC_MAX_WAIT 必须 > 0")
 
         self.startup_warnings = []
-        if not self.auth_enabled:
+        # 🔴 2026-10-03：原先这里对"API_KEYS 为空"告警（"对外鉴权已关闭"）。
+        # 透传后 `auth_enabled` 恒真 ⇒ 那个分支永不成立，留着就是**误导**。
+        #
+        # 下面这行是**真实读取**（不是凑数）：`api_keys` 已不参与鉴权，
+        # 但 `.env` 里往往还留着它 —— 明确告诉运维"这行已无效、别再改它"，
+        # 比留一个没人读的字段让人反复纠结要好。
+        if self.api_keys:
             self.startup_warnings.append(
-                "API_KEYS 为空 —— 对外鉴权已关闭。仅限内网/联调使用："
-                "任何能访问本端口的人都能消耗你的即梦积分。")
+                "API_KEYS 已被 sessionid 透传取代 —— 该配置**不再参与鉴权**"
+                "（凭据 = Authorization: Bearer <sessionid>），可以删掉了。")
 
         if self.jm_concurrency > 4:
             self.startup_warnings.append(

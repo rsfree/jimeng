@@ -105,3 +105,42 @@ def test_empty_sessionid_falls_back_to_default(settings, store):
     svc = Service(settings, store=store)
     assert svc.bundle_for(None) == (svc.client, svc.uploader, svc.vod, svc.cfg)
     assert svc.bundle_for("") == (svc.client, svc.uploader, svc.vod, svc.cfg)
+
+def test_auth_stays_on_even_when_api_keys_is_empty(settings):
+    """🔴 `API_KEYS` 为空**不许**把鉴权关掉 —— 那会让 Bearer 被忽略。
+
+    🔴 2026-10-03 实踩的坑：清理线上 `.env` 时把 `API_KEYS` 整行注释掉，
+    于是 `auth_enabled`（原= `bool(api_keys)`）变 False ⇒ `require_key`
+    走 `credential_of(None)` ⇒ **Bearer 完全被忽略**、任务以 `anonymous`
+    落库 ⇒ 表现是"生图挂住直到超时"，而任务其实在跑。
+
+    ⚠️ 这类"某个开关关掉了整条链路"的连带伤害，**光看日志很难定位**
+    （没有任何报错、协调器 ticks 正常），所以钉成门禁。
+    """
+    from app.config import Settings
+
+    blank = settings.replace(api_keys=())
+    assert blank.auth_enabled is True, (
+        "API_KEYS 为空不能关掉鉴权 —— 透传模式下凭据就是 Bearer 本身")
+    assert Settings().auth_enabled is True
+
+
+def test_task_is_recorded_with_the_callers_own_credential(client):
+    """🔴 任务必须以**调用方自己的**凭据落库（不是 `anonymous`）。
+
+    `anonymous` 意味着身份丢失 ⇒ 跨凭据隔离失效（谁都能查谁的任务）。
+    这条直接盯住 `credential_id` 的取值。
+    """
+    sid = "522ceab845a313502b72f5067534d191"
+    r = client.post("/async/v1/images/generations",
+                    headers={"Authorization": f"Bearer {sid}"},
+                    json={"model": "jimeng-t2i", "prompt": "x"})
+    assert r.status_code == 202, r.text
+    tid = r.json()["task_id"]
+
+    body = client.get(f"/async/v1/images/generations/{tid}",
+                      headers={"Authorization": f"Bearer {sid}"}).json()
+    # 用**同一把** sessionid 必须能查到（查不到 = 身份算错了）
+    assert body.get("task_id") == tid, (
+        f"用同一 sessionid 却查不到自己的任务：{body}")
+    assert body.get("status") in ("queued", "in_progress", "success")

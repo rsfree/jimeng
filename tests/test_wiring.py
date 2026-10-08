@@ -169,34 +169,40 @@ def test_no_dead_settings_knobs():
 def test_settings_constructs_and_properties_are_readable():
     """默认构造 + 派生属性可读。
 
-    🔴 2026-10-08：`upstream_configured` 语义已变—— 透传后服务**不持有**
-    凭据（由每个请求的 Bearer 带来），所以它**恒为 True**，
-    不再判`bool(JIMENG_SESSIONID or COOKIE)`。
-    真实可用性体现在**派发时**（`upstream_not_configured`）。
+    🔴 2026-10-03（sessionid 透传）：`upstream_configured` 与 `auth_enabled`
+    **都恒为 True** —— 服务不持有凭据（由每个请求的 Bearer 带来），
+    所以"env 里有没有配"不能决定"能不能干活"。
+    🔴 这两条曾在实踩中各咬一次：
+    · `upstream_configured=False` ⇒ 协调器整轮 return、任务永远 queued；
+    · `auth_enabled=False` ⇒ Bearer 被忽略、任务以 anonymous 落库、
+      隔离失效，而**日志里没有任何报错**。
     """
     s = Settings()
-    assert s.upstream_configured is True, (
-        "透传模式下服务不持有凭据 ⇒ 这个开关恒真（env 空 ≠ 不能干活）")
-    assert s.auth_enabled is False
+    assert s.upstream_configured is True
+    assert s.auth_enabled is True
     assert s.db_target.startswith("postgresql")
 
 
 
-def test_startup_warnings_surface_the_dangerous_default(monkeypatch):
-    """未开鉴权必须给启动告警（"关掉鉴权"是危险默认）。
+def test_startup_warnings_point_out_that_api_keys_is_obsolete(monkeypatch):
+    """`.env` 里还留着 `API_KEYS` 时，要明确告诉运维"这行已无效"。
 
-    ⚠️ 2026-10-08：原先这里还断言"未配 JIMENG_SESSIONID 要告警"，
-    那条已随透传作废 —— 服务不再持有凭据，"env 没配 sessionid"
-    **不是**危险状态（每个请求自己带 Bearer），报出来只会**误导运维**
-    （让人以为必须去配一个根本没人用的变量）。
+    ⚠️ 2026-10-03 语义变更：原先断言"未开鉴权要告警"，透传后
+    `auth_enabled` 恒真、那个告警永不成立。改成**迁移提示** ——
+    比"留着一个没人读的字段让人反复纠结"要有用。
     """
-    for key in ("JIMENG_SESSIONID", "JIMENG_COOKIE", "API_KEYS"):
+    for key in ("JIMENG_SESSIONID", "JIMENG_COOKIE"):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("API_KEYS", "sk-legacy-1,sk-legacy-2")
     s = Settings.from_env()
     text = " ".join(s.startup_warnings)
-    assert "API_KEYS" in text or "鉴权" in text, "未开鉴权要告警"
-    assert "JIMENG_SESSIONID" not in text, (
-        "env 无 sessionid 已不是问题（透传），再报就是**误导性假告警**")
+    assert "API_KEYS" in text and "不再参与鉴权" in text, (
+        f"应提示 API_KEYS 已失效，实际：{s.startup_warnings}")
+
+    # 清掉之后不该再有这条噪音
+    monkeypatch.delenv("API_KEYS")
+    assert not any("API_KEYS" in w for w in Settings.from_env().startup_warnings), (
+        "API_KEYS 没配时不该报这条")
 
 
 
