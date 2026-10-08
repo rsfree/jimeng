@@ -718,6 +718,16 @@ def set_blend_capable(mapping: dict[str, bool]) -> None:
     _BLEND_CAPABLE.update({k: bool(v) for k, v in mapping.items()})
 
 
+def blend_capable_map() -> dict[str, bool]:
+    """当前已回填的 blend 能力表（**副本**）。
+
+    🔴 空 dict = "没读到能力表"，与"读到了但模型不在表里"是**两回事**：
+    前者应 fail-open（别因上游一次抖动拒掉所有 i2i），
+    后者按 docstring 保守拒绝。消费方必须区分这两种状态。
+    """
+    return dict(_BLEND_CAPABLE)
+
+
 def resolve(model: str | None, *, has_image: bool,
             n_images: int = 1, video: bool = False) -> tuple[Capability, str | None]:
     """解析 `model`，返回 (能力, 上游模型 key 或 None)。

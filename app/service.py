@@ -408,7 +408,15 @@ class Service:
             capture_upstream=st.otel_capture_upstream,
         )
         up = ImageXUploader(c)
-        bundle = (c, up, VodUploader(c, imagex=up), ModelConfigCache(c))
+        cfg2 = ModelConfigCache(c)
+        # 🔴 2026-10-03：blend 门控的**回填点**（此前全仓无人调 refresh ⇒
+        # 门控从未生效）。建 cfg 后顺手回填；snapshot 失败只会留下空表，
+        # 消费端（i2i 分支）对空表 fail-open，不会拒掉正常请求。
+        try:
+            self.refresh_blend_capability(cfg2)
+        except Exception as e:            # noqa: BLE001 —— 回填失败不挡建连
+            log.warning("blend 能力表回填失败（门控将 fail-open）: %s", e)
+        bundle = (c, up, VodUploader(c, imagex=up), cfg2)
         with self._cred_lock:
             self._cred_pool[sessionid] = bundle
             self._cred_pool.move_to_end(sessionid)
@@ -454,7 +462,7 @@ class Service:
 
     # ------------------------------------------------------------------ 能力表
 
-    def refresh_blend_capability(self) -> int:
+    def refresh_blend_capability(self, cfg: Any | None = None) -> int:
         """从**服务端能力表**回填"哪些上游模型支持 blend（图生图）"。
 
         数据源 = `get_common_config` 的 `feats`（含 `byte_edit`），**只读零成本**。
@@ -463,11 +471,19 @@ class Service:
         两种都按"不支持"处理（保守拒绝）并让报错说清替代路径：
         **猜一个 blend 能不能用，代价是建任务后才炸**。
         返回回填的条目数（0 = 没读到能力表，此时全部按不支持处理）。
+
+        ⚠️ 2026-10-03 **修复一个从 mj82 那笔起就存在的"半接线"**：
+        本方法**全仓没有任何调用者**（`git log -S` 实锤）、
+        `upstream_supports_blend` 也无人消费 ⇒ blend 门控自登记起
+        **从未真正生效** —— 带不支持模型的 i2i 不会被本地拦下，
+        而是**提交到上游才失败**（浪费钱 + 报错难懂）。
+        现在由 `bundle_for` 在建 cfg 时调用（含显式 `cfg` 参数，便于测试）。
         """
-        if self.cfg is None:
+        cfg = cfg or self.cfg
+        if cfg is None:
             models.set_blend_capable({})
             return 0
-        snap = self.cfg.snapshot()
+        snap = cfg.snapshot()
         if snap is None:
             models.set_blend_capable({})
             return 0
@@ -1907,6 +1923,24 @@ class Service:
             # 否则"我换了模型"只换了文生图，图生图还是旧模型（静默不一致）。
             model_key = rec.upstream_model or DEFAULT_MODEL
             opts = self.cfg.count_options(model_key) if self.cfg else None
+            # 🔴 2026-10-03：blend 门控**真正接线**（此前 refresh/消费两端
+            # 都没人调用，门控从未生效）。判定分三种：
+            # · 表非空且模型**明确不支持** ⇒ 400 拦下（**未提交、不花钱**）；
+            # · 表非空但**没有这个模型** ⇒ 保守拒绝（docstring 的既定语义）；
+            # · **表为空**（能力表没读到）⇒ **fail-open 放行 + 留痕** ——
+            #   上游一次抖动不该拒掉所有 i2i（与素材预审的 fail-open 同理）。
+            _bmap = models.blend_capable_map()
+            if not _bmap:
+                degradations = list(getattr(rec, "degradations", None) or [])
+                self.store.patch(rec.task_id, degradations=degradations + [
+                    "⚠️ blend 能力表未读到 ⇒ 跳过**提交前门控**直接提交；"
+                    "若模型真不支持，将在上游失败（费用照常）。"])
+            elif model_key not in _bmap or not _bmap[model_key]:
+                raise InvalidParameterError(
+                    f"模型 `{model_key}` 不支持图生图（blend）——"
+                    f"来自**服务端能力表**的权威判定（feats 无 `byte_edit`）。"
+                    f"改用**不带模型名**的 `jimeng-i2i`（默认 Lite）即可。",
+                    param="model")
             sid = self.client.blend(rec.prompt, image_uris=image_uris, size=size,
                                     count=rec.n or 1, count_options=opts,
                                     model=model_key,

@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import time
 
+from tests.test_coordinator import (
+    _create, _data_uri, _PNGS, ok_state, submitted_state)
+
 
 # ---------------------------------------------------------------------------
 # ① 🔴 凭据绝不能出现在任何客户可见的响应里
@@ -248,3 +251,93 @@ def test_credential_context_is_always_popped(settings, store, fake_jimeng,
     assert pushes == pops, (
         f"_push_cred({pushes}) 与 _pop_cred({pops}) 数量不等"
         f" ⇒ 有路径泄漏凭据上下文")
+
+
+# ---------------------------------------------------------------------------
+# 🔴 blend 门控的接线（此前 refresh/消费两端都没人调 ⇒ 从未生效）
+# ---------------------------------------------------------------------------
+
+def _mk_spec(feats: tuple | None):
+    from app.upstream.jimeng.capabilities import ModelSpec
+    return ModelSpec(model_req_key="k", model_name_starling_key="n",
+                     model_tip_starling_key="t", feats=feats)
+
+
+def test_bundle_for_populates_blend_capable_map(settings, store, monkeypatch):
+    """🔴 `bundle_for` 建 cfg 时必须**回填** blend 能力表。
+
+    2026-10-03 发现：`refresh_blend_capability` 与
+    `upstream_supports_blend` **全仓都没有调用者**（`git log -S` 实锤）
+    ⇒ 门控自 mj82 登记起**从未生效**。
+
+    ⚠️ 必须 monkeypatch `ModelConfigCache`：`bundle_for` 会**真的**新建
+    client 并让 cfg 去 `get_common_config` —— 那是**真实上游往返**，
+    测试不该碰网络（实测确实打出去了，还顺带确认了真实表里
+    所有 Seedream 模型都带 `byte_edit` ⇒ 接线后不会误拒现有模型）。
+    """
+    from app.models import blend_capable_map
+    from app.service import Service
+
+    class _Spec:
+        def __init__(self, feats):
+            self.feats = feats
+
+    class _Snap:
+        specs = {"high_aes_general_v50p_large": _Spec(("byte_edit",)),
+                 "high_aes_general_v50": _Spec(())}
+
+    class _FakeCfg:
+        def __init__(self, _client):
+            pass
+
+        def snapshot(self):
+            return _Snap()
+
+    monkeypatch.setattr("app.service.ModelConfigCache", _FakeCfg)
+
+    svc = Service(settings, store=store, client=None, uploader=None, cfg=None)
+    svc.bundle_for("522ceab845a313502b72f5067534d191")
+    m = blend_capable_map()
+    assert m.get("high_aes_general_v50p_large") is True, (
+        "Pro 的 feats 含 byte_edit ⇒ 必须回填为 True")
+    assert m.get("high_aes_general_v50") is False, (
+        "该模型 feats 为空 ⇒ False（带模型名的 i2i 用它应被拦下）")
+
+
+
+def test_blend_gate_rejects_unsupported_model_before_submit(
+        client, client_state, fake_jimeng, fake_uploader, service):
+    """🔴 带明确不支持 blend 的模型 ⇒ 本地 400 拦下，**不提交、不花钱**。"""
+    from app.models import set_blend_capable
+
+    set_blend_capable({"high_aes_general_v50": False,
+                       "high_aes_general_v50p_large": True})
+    n_before = len(fake_jimeng.of("blend"))
+    tid = _create(client, model="jm_image_model_yc_mj82", prompt="x",
+                  image=[_data_uri(b) for b in _PNGS[:1]])
+    client_state.coordinator.tick()
+    rec = service.store.get(tid)
+    assert rec.status == "failure"
+    assert "blend" in (rec.error or {}).get("message", ""), rec.error
+    assert len(fake_jimeng.of("blend")) == n_before, (
+        "门控应该**在提交前**拦下 —— 却真的调了上游 blend")
+
+
+def test_blend_gate_fails_open_when_table_unreadable(
+        client, client_state, fake_jimeng, fake_uploader, service):
+    """🔴 能力表**没读到**（空表）⇒ fail-open 放行 + 留痕。
+
+    上游一次抖动不该拒掉所有 i2i —— 与素材预审的 fail-open 同理。
+    留痕让调用方知道"这次没预检"。
+    """
+    from app.models import set_blend_capable
+
+    set_blend_capable({})                     # 空 = 没读到
+    fake_jimeng.states = [submitted_state(), ok_state(["https://cdn/a.png"])]
+    tid = _create(client, model="jimeng-i2i", prompt="x",
+                  image=[_data_uri(b) for b in _PNGS[:1]])
+    client_state.coordinator.tick()
+    rec = service.store.get(tid)
+    assert rec.status == "in_progress", rec.error
+    assert any("跳过" in d and "门控" in d for d in rec.degradations), (
+        f"fail-open 必须留痕，degradations={rec.degradations}")
