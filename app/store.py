@@ -117,6 +117,14 @@ class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)
     #: 调用方 Key 的 HMAC 指纹。**明文 Key 永不落库。**
     credential_id: str = Field(index=True)
+    #: 🔴 2026-10-03（sessionid 透传）：**加密后**的即梦 sessionid。
+    #: 为什么必须落库：受理在请求内、派发在协调器 Later（可能跨几秒），
+    #: 协调器要拿回**原始 sessionid** 才能调上游，而 `credential_id`
+    #: 是单向 HMAC 指纹、认不出人。
+    #: 🔴 **绝不明文**：`encrypt_credential` 用 AES-GCM（复用
+    #: `credential_fingerprint_secret`，不新增第二把密钥）。
+    #: 为空 = 该任务走**默认凭据**（旧行为，向后兼容）。
+    upstream_sessionid: Optional[str] = None
     model: str                        # 对外 model（如 jimeng-t2i）
     cap_key: str                      # 内部能力 key（如 jimeng:t2i）
     upstream_model: Optional[str] = None

@@ -121,6 +121,8 @@ class FakeJimeng:
 
     #: 每次 `fetch` 依次返回的 TaskState；用完后重复最后一个
     states: list[TaskState] = field(default_factory=list)
+    #: 预审结果（用例可改成 `({"audit_decision": 2, ...},)` 测拒绝分支）
+    audit_result: tuple = ({"audit_decision": 1},)
     submit_id: str = "upstream-submit-id"
     warnings: list[str] = field(default_factory=list)
     fail_submit: Exception | None = None
@@ -209,6 +211,20 @@ class FakeJimeng:
 
     def fetch(self, submit_id: str) -> TaskState:
         return self.fetch_many([submit_id])[submit_id]
+
+    def audit_materials(self, uris: list[str], **kw: Any) -> list[dict]:
+        """素材预审替身 —— **默认全部通过**（`audit_decision=1`）。
+
+        🔴 为什么需要它（2026-10-03）：生产链路在提交生成前会调
+        `execute_generate_audit`（输入图违规在那儿拦）。假客户端缺这个方法
+        ⇒ `getattr` 失败被 `_pre_audit_materials`的 **fail-open**兜住
+        （放行 + 留痕）——测试照样能过，但会刷无意义的告警、且**测不到**
+        "预审拒绝 ⇒ 不提交生成"这条真路径。
+
+        ⚠️ 这里**默认放行**：绝大多数用例与审核无关。要测拒绝分支的用例
+        自行设置 `fake_jimeng.audit_result = {"audit_decision": 2, ...}`。
+        """
+        return list(self.audit_result)
 
     def common_config(self, **kw: Any) -> dict:
         self._record("common_config", **kw)

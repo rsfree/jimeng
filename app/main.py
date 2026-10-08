@@ -132,9 +132,18 @@ def require_key(request: Request) -> str:
     if not settings.auth_enabled:
         return request.app.state.service.credential_of(None)
     if not key:
-        raise AuthError("缺少 Authorization: Bearer <key>")
-    if key not in settings.api_keys:
-        raise AuthError("API Key 无效")
+        raise AuthError("缺少 Authorization: Bearer <sessionid>")
+    # 🔴 2026-10-03（用户口径"鉴权用 SESSIONID 就行"，纯透传）：
+    # Bearer **就是即梦 sessionid**，直接当上游凭据用。
+    # 为什么不再查白名单：
+    # · 调用方换 sessionid 是**常态**（登录态会过期、要换号），白名单
+    #   意味着"每次换号都要改服务配置"，这与服务化网关的定位冲突；
+    # · 凭据本来就是调用方**自己带**的，服务不持有、不分发。
+    # ⚠️ 代价（知情接受）：**任何持有即梦登录态的人都能调这个服务**，
+    # 计费与风控都归他自己（我们的服务不代付）。
+    #保留 `API_KEYS` 配置项但不再用于校验—— 免得它变成"看起来在生效、
+    # 其实没读"的假配置（比没有更坏）。
+    return request.app.state.service.credential_of(key)
     return request.app.state.service.credential_of(key)
 
 
@@ -279,7 +288,8 @@ def _install_routes(app: FastAPI) -> None:
         而不是让受理请求随上游网络抖动。
         """
         svc: Service = request.app.state.service
-        rec = svc.create(body.model_dump(), credential=credential)
+        rec = svc.create(body.model_dump(), credential=credential,
+                         sessionid=_bearer(request))
 
         # 叫醒协调器：不然这条任务要等到下一个 tick 才被发现（默认最多白等 1s）。
         # 纯优化 —— 唤醒丢了也只是慢一个 tick，"该派发谁"始终由库里的状态决定。
@@ -325,7 +335,8 @@ def _install_routes(app: FastAPI) -> None:
                 "或开启协调器后重试。")
 
         svc: Service = request.app.state.service
-        rec = svc.create(body.model_dump(), credential=credential)
+        rec = svc.create(body.model_dump(), credential=credential,
+                         sessionid=_bearer(request))
         coordinator.wake()
         rec = svc.wait_terminal(rec.task_id, credential,
                                 max_wait=settings.sync_max_wait)
@@ -407,7 +418,8 @@ def _install_routes(app: FastAPI) -> None:
         ark_body = body.model_dump()
         our, degradations = ark_translate(ark_body)
         svc: Service = request.app.state.service
-        rec = svc.create(our, credential=credential, video=True,
+        rec = svc.create(our, credential=credential,
+                         sessionid=_bearer(request), video=True,
                          preset_degradations=degradations,
                          ark_model=str(ark_body.get("model") or ""))
         request.app.state.coordinator.wake()

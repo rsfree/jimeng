@@ -465,6 +465,16 @@ Authorization: Bearer <key>
    **后者覆盖前者、静默丢掉 4 个模型** —— 而 `/v1/models` 里两条还都显示着它，
    看着完全正常。门禁 `test_ark_name_is_one_to_one_and_never_collapses`。
 
+7. 🔴 **鉴权 = sessionid 透传**（2026-10-08 用户口径"鉴权用 SESSIONID 就行"）：
+   `Authorization: Bearer <即梦 sessionid>` —— **不再查 `API_KEYS` 白名单**，
+   该 sessionid 直接作为上游凭据用于**这个任务**。
+   · 换 sessionid / 换号**不用改服务配置**，调用方自带凭据。
+   · 🔴 **代价（知情接受）**：任何持有即梦登录态的人都能调本服务；
+     计费与风控归调用方本人，服务不代付。
+   ·「不带 Authorization」仍 401；带别人的凭据查别人的任务 → **404**
+     （不泄露该id 是否存在）。
+   · ⚠️ 旧配置项 `API_KEYS` **不再参与校验**（保留仅为不破坏现有 .env）。
+
 6. 🔴 **`model` 可用后缀指定分辨率档**（2026-10-02 方案 B）：
    `Seedream 5.0 Lite 4k` / `mj-v8.2-2k` / `high_aes_general_v50-4k`
    （后缀取 `-1k` / `-1.5k` / `-2k` / `-4k`，也接受空格写法）。

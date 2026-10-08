@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections import OrderedDict
 import hmac
 import json
 import logging
@@ -329,6 +331,9 @@ class Service:
         self.client = client
         self.uploader = uploader
         self.cfg = cfg
+        #: 🔴 外部注入（测试）标记：注入的 client 对**所有** sessionid 生效，
+        #: 见 `bundle_for`。生产为False（client 由本类按 sessionid 自建）。
+        self._client_injected = client is not None
         if settings.upstream_configured and self.client is None:
             self.client = JimengClient(
                 sessionid=settings.jimeng_sessionid,
@@ -347,6 +352,101 @@ class Service:
         if self.vod is None and self.client is not None \
                 and self.uploader is not None:
             self.vod = VodUploader(self.client, imagex=self.uploader)
+        #: 🔴 2026-10-03（sessionid 透传）：**按 sessionid 缓存的客户端池**。
+        #: 为什么需要池：受理时每个调用方带来**自己的** sessionid，
+        #: 而 `JimengClient` / `ImageXUploader` / `VodUploader` 都与
+        #: 凭据绑定（上传器还要持STS）⇒ 不能共用单例。
+        #: 为什么不每次新建：建客户端要读 env/算派生，开销不小，而
+        #: 同一调用方会连续发很多请求 ⇒ 有界 LRU（默认 32 把）刚好。
+        #: ⚠️ **单进程假设**：`WORKERS=1`（见 gunicorn_conf.py）。多 worker
+        #: 时各进程一份池，互不影响正确性（凭据都在库里），只是命中率低些。
+        self._cred_lock = threading.Lock()
+        #: 凭据上下文的**栈**（`_push_cred`/`_pop_cred` 必须配对）
+        self._cred_stack: list[tuple[Any, Any, Any, Any]] = []
+        self._cred_pool: "OrderedDict[str, tuple[Any, Any, Any, Any]]" = \
+            OrderedDict()
+        self._cred_pool_max = max(1, int(getattr(settings, "cred_pool_max", 32)))
+
+    # ------------------------------------------------------- 透传：客户端池
+
+    def bundle_for(self, sessionid: str | None):
+        """取（或建）某个 sessionid 对应的一整套上游组件。
+
+        返回 `(client, uploader, vod, cfg)`；`sessionid` 为空时返回**默认**
+        那一套（= 旧行为，向后兼容）。
+
+        🔴 为什么四个东西必须**成套**取：`VodUploader` 复用 `ImageXUploader`
+        的 STS（与 Memory 里"改 service 参数时密钥推导要跟着改"同源），
+        混用两把 sessionid 的组件会拿到**不属于它的**上传凭据。
+        """
+        if not sessionid:
+            return (self.client, self.uploader, self.vod, self.cfg)
+        # 🔴 2026-10-03：外部**注入**的 client（测试的 FakeJimeng）必须对
+        # 所有 sessionid 生效—— 否则 `bundle_for()`会给每个 sessionid 新建
+        # 一个**真**客户端，绕过注入的假上游 ⇒ 测试去打真网络拿到 1015。
+        # 判据用"是否外部注入"这个显式开关，而不是"client 是否为 None"
+        # （后者在生产里也是 None 起步，容易与"没注入"混淆）。
+        if self._client_injected:
+            return (self.client, self.uploader, self.vod, self.cfg)
+        with self._cred_lock:
+            hit = self._cred_pool.get(sessionid)
+            if hit is not None:
+                self._cred_pool.move_to_end(sessionid)
+                return hit
+        # 🔴 建连接要读 env / 做派生，**别持锁**做（会串行化所有请求）。
+        st = self.settings
+        c = JimengClient(
+            sessionid=sessionid,
+            cookie=st.jimeng_cookie,
+            base=st.jimeng_base_url,
+            workspace_id=st.jimeng_workspace_id,
+            poll_interval=st.jimeng_poll_interval,
+            capture_upstream=st.otel_capture_upstream,
+        )
+        up = ImageXUploader(c)
+        bundle = (c, up, VodUploader(c, imagex=up), ModelConfigCache(c))
+        with self._cred_lock:
+            self._cred_pool[sessionid] = bundle
+            self._cred_pool.move_to_end(sessionid)
+            while len(self._cred_pool) > self._cred_pool_max:
+                old_sid, old = self._cred_pool.popitem(last=False)
+                for obj in old:
+                    closer = getattr(obj, "close", None)
+                    if callable(closer):
+                        try:
+                            closer()
+                        except Exception:       # noqa: BLE001,S110
+                            pass               # 关闭失败不影响正确性
+        return bundle
+
+    def _push_cred(self, client: Any, uploader: Any, vod: Any, cfg: Any,
+                   rec: TaskRecord) -> None:
+        """把某任务的凭据组件**临时**换到 `self.*` 上，下游代码不用逐个改参数。
+
+        🔴 为什么需要这一层：上传 / 提交 / 预审 / 续生成这几条链共 15+ 处
+        读 `self.client` / `self.uploader`。全改成参数传递会让 diff 巨大、
+        极易漏掉某一处 ⇒ **漏掉的那处就会用错凭据**（静默串号）。
+        用上下文换入换出，diff 小且漏不掉。
+
+        ⚠️ **安全前提**：`WORKERS=1`（gunicorn_conf.py），协调器是单线程，
+        任一时刻只有一个任务在推进 ⇒ 换入/换出不会交错。
+        万一将来上多 worker，这里必须换成**线程局部**（`contextvars`）
+        或按任务传参 —— 已用 `test_no_credential_context_leak` 盯住
+        "必须配对"的性质。
+        """
+        prev = (self.client, self.uploader, self.vod, self.cfg)
+        self.client, self.uploader, self.vod, self.cfg = (
+            client, uploader, vod, cfg)
+        self._cred_stack.append(prev)
+
+    def _pop_cred(self) -> None:
+        if not self._cred_stack:            # pragma: no cover-防御
+            raise RuntimeError("_pop_cred 没有对应的 _push_cred（上下文错配）")
+        self.client, self.uploader, self.vod, self.cfg = self._cred_stack.pop()
+
+    def sessionid_of(self, rec: TaskRecord) -> str | None:
+        """从任务行取回**原始** sessionid（明文；空 ⇒ 走默认凭据）。"""
+        return getattr(rec, "upstream_sessionid", None) or None
 
     # ------------------------------------------------------------------ 能力表
 
@@ -402,6 +502,7 @@ class Service:
         return credential_id(api_key, self._cred_secret)
 
     def create(self, body: dict[str, Any], *, credential: str,
+               sessionid: str | None = None,
                dry_run: bool = False, video: bool = False,
                preset_degradations: list[str] | None = None,
                ark_model: str | None = None) -> TaskRecord:
@@ -862,6 +963,10 @@ class Service:
         rec = TaskRecord(
             task_id=new_task_id(cap.api_id),
             credential_id=credential,
+            #: 🔴 2026-10-03（sessionid 透传）：**明文**存调用方的即梦 sessionid
+            #:（用户拍板"直接明文就行"）。协调器 Later 靠它取回凭据——
+            #: `credential_id` 是单向指纹，认不出人。
+            upstream_sessionid=sessionid or None,
             model=cap.api_id,
             cap_key=cap.key,
             upstream_model=upstream_model,
@@ -1040,13 +1145,34 @@ class Service:
     # ------------------------------------------------------------------ 推进
 
     def dispatch(self, rec: TaskRecord) -> None:
-        """把 queued 任务推到上游（**计费动作**）。协调器线程调用。"""
+        """把queued 任务推到上游（**计费动作**）。协调器线程调用。"""
+        # 🔴 2026-10-03（sessionid 透传）：**先按任务自己的凭据**取一整套
+        # 上游组件，取不到才退回全局默认那套。
+        # 为什么必须在最前面：这个方法往下会调上传（要 STS）、提交（要
+        # sessionid）、预审 —— 三者**必须**是同一个人的凭据，混用会拿到
+        # 不属于他的上传凭据（表现为莫名其妙的 1015/上传失败）。
+        cred_client, cred_uploader, cred_vod, cred_cfg = \
+            self.bundle_for(self.sessionid_of(rec))
+        if cred_client is None or cred_uploader is None:
+            self._fail(rec, CapabilityUnavailableError(
+                "服务未配置上游客户端（JIMENG_SESSIONID 缺失）", upstream="jimeng"))
+            return
+        # 让下游（_prepare_input_images / _submit / _pre_audit_materials）
+        # 继续用 `self.client` 这种老写法，不必逐个改成参数 ——
+        # 单进程单线程协调器下这是安全的（见 memory：WORKERS=1）。
+        self._push_cred(cred_client, cred_uploader, cred_vod, cred_cfg, rec)
+        try:
+            self._dispatch_with(rec, cap=models.REGISTRY[rec.cap_key])
+        finally:
+            self._pop_cred()
+        return
+
+    def _dispatch_with(self, rec: TaskRecord, cap: models.Capability) -> None:
+        """`dispatch` 的真正实现（凭据已在 `dispatch` 里推入上下文）。"""
         if self.client is None or self.uploader is None:
             self._fail(rec, CapabilityUnavailableError(
                 "服务未配置上游客户端（JIMENG_SESSIONID 缺失）", upstream="jimeng"))
             return
-
-        cap = models.REGISTRY[rec.cap_key]
         # 闸门：节奏 + 冷却。**在这之前不发任何请求**
         try:
             self.gate.acquire()
@@ -1149,27 +1275,47 @@ class Service:
             return {"polled": 0, "expired": expired,
                     "skipped": len(recs) - expired}
 
-        ids = [r.upstream_submit_id for r in asked if r.upstream_submit_id]
-        try:
-            states = self.client.fetch_many(ids)
-        except JimengError as e:
-            err = to_adapter_error(e)
-            for rec in asked:
-                if err.retryable:
-                    # 可重试的探测失败**不改状态**（任务还在跑），只记账
-                    self.store.patch(rec.task_id, attempts=rec.attempts + 1)
-                else:
-                    self._fail(rec, err)
-            OBS.warning("poll failed", error=err.message, retryable=err.retryable,
-                        tasks=len(asked))
-            return {"polled": 0, "expired": expired, "skipped": 0}
-
+        # 🔴🔴 2026-10-03（sessionid 透传）：**按凭据分组**再批量查。
+        # 为什么必须分组 —— 透传后在途任务分属**不同sessionid**，而
+        # `fetch_many` 用**一把**凭据查所有 submit_id：
+        # · 查不到别人的任务（上游按凭据隔离）；
+        # · 更糟：这是**越权** —— A 的凭据在试探 B 的任务是否存在。
+        # 原来的"批量"设计（省请求量）仍然成立，只是**组的边界**变了。
+        groups: "OrderedDict[str | None, list[TaskRecord]]" = OrderedDict()
         for rec in asked:
-            st = states.get(rec.upstream_submit_id or "")
-            if st is None:                                  # 理论上不会发生
+            if rec.upstream_submit_id:
+                groups.setdefault(self.sessionid_of(rec), []).append(rec)
+
+        polled = 0
+        for sid, bucket in groups.items():
+            ids = [r.upstream_submit_id for r in bucket]
+            cli = self.bundle_for(sid)[0]
+            try:
+                states = cli.fetch_many(ids)
+            except JimengError as e:
+                err = to_adapter_error(e)
+                for rec in bucket:
+                    if err.retryable:
+                        # 可重试的探测失败**不改状态**（任务还在跑），只记账
+                        self.store.patch(rec.task_id,
+                                         attempts=rec.attempts + 1)
+                    else:
+                        self._fail(rec, err)
+                OBS.warning("poll failed", error=err.message,
+                            retryable=err.retryable, tasks=len(bucket),
+                            cred=("default" if sid is None else f"{sid[:6]}…"))
                 continue
-            self._advance(rec, st)
-        return {"polled": len(asked), "expired": expired, "skipped": 0}
+            for rec in bucket:
+                st = states.get(rec.upstream_submit_id or "")
+                if st is None:                # 本组内查不到（不该发生）
+                    continue
+                self._push_cred(*self.bundle_for(sid), rec=rec)
+                try:
+                    self._advance(rec, st)
+                finally:
+                    self._pop_cred()
+            polled += len(bucket)
+        return {"polled": polled, "expired": expired, "skipped": 0}
 
     def poll_due(self, rec: TaskRecord, *, now: float | None = None) -> bool:
         """这个任务现在该不该问上游（供测试与运维观测用，**无副作用**）。

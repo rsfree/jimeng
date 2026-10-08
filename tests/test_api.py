@@ -282,10 +282,28 @@ def test_missing_key_is_401(client):
     assert r.json()["error"]["code"] == "invalid_api_key"
 
 
-def test_wrong_key_is_401(client):
+def test_missing_bearer_is_still_401(client):
+    """🔴 **没有** Authorization 头依然 401（透传不改变这条）。
+
+    2026-10-03 口径变更：Bearer 改成**即梦 sessionid 透传**、不再查白名单，
+    所以"带一个不认识的 key"不再是 401（它会被当sessionid 收下，
+    在**派发时**才因凭据无效而失败 —— 那是上游的判断，不是鉴权层的）。
+
+    ⚠️ 代价（知情接受）：**任何持有即梦登录态的人都能调本服务**，
+    计费与风控归他自己，我们的��务不代付。
+    """
+    assert client.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"}
+                       ).status_code == 401
+    assert client.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"},
+                       headers={"Authorization": ""}
+                       ).status_code == 401
+
+
+def test_any_bearer_is_accepted_as_sessionid(client):
+    """透传的**正向**语义：任何非空 Bearer 都能建任务（凭据有效性在上游校验）。"""
     r = client.post(BASE, json={"model": "jimeng-t2i", "prompt": "x"},
-                    headers={"Authorization": "Bearer sk-not-in-list"})
-    assert r.status_code == 401
+                    headers={"Authorization": "Bearer 522ceab845a313502b72f5067534d191"})
+    assert r.status_code == 202, r.text
 
 
 # ---------------------------------------------------------------------------
