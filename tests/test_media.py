@@ -26,37 +26,58 @@ def _png(rgb: tuple[int, int, int] = (10, 20, 30)) -> bytes:
 
 
 def _stub_download(delays: dict[str, float], bad: set[str] | None = None):
-    """按 URL 决定耗时/是否坏图的下载替身（不碰网络）。"""
+    """按 URL 决定耗时/是否坏图的下载替身（不碰网络）。
+
+    🔴 2026-10-03：返回对象额外带**并发观测**（`peak` = 同时在飞的峰值）。
+    这样"是否并发下载"可以用**计数**断言，而不是掐墙钟 ——
+    计时断言在负载高的机器上会假红，且放宽门限后又失去鉴别力
+    （详见 `test_multi_url_download_is_parallel` 的说明）。
+    """
     bad = bad or set()
 
-    def _dl(url: str, _settings) -> bytes:
-        time.sleep(delays.get(url, 0.01))
-        return b"not-an-image" if url in bad else _png()
+    class _Stub:
+        inflight = 0
+        peak = 0
 
-    return _dl
+        def __call__(self, url: str, _settings) -> bytes:
+            _Stub.inflight += 1
+            _Stub.peak = max(_Stub.peak, _Stub.inflight)
+            try:
+                time.sleep(delays.get(url, 0.01))
+                return b"not-an-image" if url in bad else _png()
+            finally:
+                _Stub.inflight -= 1
+
+    return _Stub()
 
 
 def test_multi_url_download_is_parallel(monkeypatch, settings):
-    """多张 URL **并发**下载 —— 三张的总耗时应接近"最慢的那张"，而不是三者之和。"""
+    """多张 URL **并发**下载 —— 用**计数**判定，不掐墙钟。
+
+    🔴 2026-10-03 改判据：原先断言 `elapsed < 0.14s`（后放宽到 0.5s），
+    **已失去鉴别力** —— 串行下界 0.10s、并发在负载高时也能到 0.5s，
+    两者落进同一区间 ⇒ 真退化成串行也照样绿。
+    （实测：用 `git stash` 对照基线，该断言在全量跑时同样会红
+    ⇒ 它测的是**机器状态**而不是代码。）
+
+    ✅ 现在断言 `stub.peak >= 2`：只要**同时有两个**下载在飞就是并发。
+    **与机器负载无关**；退化成串行时峰值必然 = 1 ⇒ 必红。
+    """
     urls = ["https://a/1.png", "https://a/2.png", "https://a/3.png"]
     # 让**第一个**最慢 ⇒ 串行必超时；并发则接近 0.06s
-    monkeypatch.setattr(media, "download",
-                        _stub_download({urls[0]: 0.06, urls[1]: 0.02, urls[2]: 0.02}))
+    stub = _stub_download({urls[0]: 0.06, urls[1]: 0.02, urls[2]: 0.02})
+    monkeypatch.setattr(media, "download", stub)
 
     t0 = time.time()
     blobs = load_images(urls, settings)
     elapsed = time.time() - t0
 
     assert len(blobs) == 3
-    # ⚠️ 2026-10-03：门限 0.14 → **0.5s**。
-    # 原值假设"机器空闲"，实测**基线**（不含任何本次改动）在全量跑时
-    # 也会超时 ⇒ 这是**环境敏感**，不是被测代码的问题。
-    # 并发性已由"确实下载了 3 次"钉住，这里只需区分
-    # "串行 ≈0.10s+"与"并发 ≈0.06s"两个量级 ⇒ 0.5s 足够宽且仍能
-    # 抓住"退化成串行"（那会是 3 倍 delay_s 以上）。
-    assert elapsed < 0.5, (
-        f"三张用了 {elapsed:.2f}s —— 看起来是串行的"
-        f"（串行下界 ≈0.10s；门限 0.5s 留足了高负载余量）")
+    assert stub.peak >= 2, (
+        f"峰值并发只有 {stub.peak} ⇒ **串行下载**"
+        f"（墙钟 {elapsed:.2f}s 仅供参考，不再是判据）")
+    assert stub.inflight == 0, "结束后不该还有在飞的下载"
+
 
 
 def test_multi_url_download_keeps_input_order(monkeypatch, settings):

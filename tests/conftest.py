@@ -277,15 +277,26 @@ class FakeUploader:
             return 0.0
         return self.delay_s * (1 + hashlib.sha256(data).digest()[0] % 3)
 
+    #: 🔴 并发观测（2026-10-03）：`inflight` 是**当前在飞**数、`peak_inflight`
+    #: 是**历史峰值**。加它是为了让"是否并发上传"可以用**计数**断言，
+    #: 而不是掐墙钟 —— 计时断言在负载高的机器上会假红（见下）。
+    inflight: int = 0
+    peak_inflight: int = 0
+
     def upload(self, data: bytes, **kw: Any) -> str:
         if self.fail:
             raise self.fail
-        time.sleep(self._delay(data))
-        self.uploads.append(data)
-        uri = f"{self.uri}-{len(self.uploads) - 1}"
-        self.uris.append(uri)
-        self.pairs.append((data, uri))
-        return uri
+        self.inflight += 1
+        self.peak_inflight = max(self.peak_inflight, self.inflight)
+        try:
+            time.sleep(self._delay(data))
+            self.uploads.append(data)
+            uri = f"{self.uri}-{len(self.uploads) - 1}"
+            self.uris.append(uri)
+            self.pairs.append((data, uri))
+            return uri
+        finally:
+            self.inflight -= 1
 
     def uri_for(self, data: bytes) -> str:
         """这张字节最终换到的 uri（用于断言顺序与映射）。"""

@@ -168,18 +168,18 @@ def test_prepare_input_images_preserves_order_despite_out_of_order_completion(
 
 def test_multi_image_uploads_run_in_parallel(
         client, client_state, fake_jimeng, fake_uploader, service):
-    """多张垫图的上传**并发**跑 —— 3 张的耗时应远小于"串行 3 次"。
+    """多张垫图的上传**并发**跑 —— 用**计数**判定，不掐墙钟。
 
-    每张按内容派生 1~3 倍 `delay_s`：串行下 3 张至少 3×0.05s；并发下接近
-    "最慢的那一张"。
+    🔴 2026-10-03 改判据：原先断言 `elapsed < 0.28s`（后来放宽到 1.0s），
+    **已失去鉴别力** —— 串行下界 0.15s、并发在负载高时也能到 0.9s，
+    两者落进同一区间 ⇒ 就算真的退化成串行，这条也**照样绿**。
+    （实测：用 `git stash` 对照基线，该断言在全量跑时也会红 ⇒ 它测的是
+    **机器状态**而不是代码。）
 
-    ⚠️ 2026-10-03：门限从 `0.28s` 放宽到 `0.6s`，并说明**为什么**。
-    原门限假设"机器空闲" —— 实测在**全量跑**（前 400 个用例刚跑完、
-    PG 连接池/编译缓存都在发热）时会用到 0.47s，于是变成**偶发红**，
-    而它其实什么都没测错（单跑一直是0.05s 上下）。
-    🔴 计时类断言的门限必须按"**高负载下**"留余量，否则它测的是
-    机器状态而不是代码。并发性已经由下面的"上传确实发生了 3 次"钉住，
-    这里只需要区分"串行 3×0.05"与"并发 ~0.05"两个**量级** ⇒ 0.6s 足够宽。
+    ✅ 现在断言 `peak_inflight >= 2`：假上传器进入 +1 / 退出 -1，
+    只要**同时有两个**在飞就说明是并发。**与机器负载无关**，
+    且"退化成串行"时峰值必然 = 1 ⇒ 必红。
+    墙钟只作为**辅助信息**记进断言消息，不再是判据。
     """
     fake_uploader.delay_s = 0.05
     fake_jimeng.states = [submitted_state(), ok_state(["https://cdn/a.png"])]
@@ -191,12 +191,12 @@ def test_multi_image_uploads_run_in_parallel(
     elapsed = time.time() - t0
 
     assert len(fake_uploader.uploads) == 3
-    assert elapsed < 1.0, (
-        f"3 张上传用了 {elapsed:.2f}s，看起来是串行的"
-        f"（串行下界 ≈ 3×0.05s=0.15s；实测高负载下会到 0.9s ⇒ 门限 1.0s。"
-        f"注意：这已接近'抓不住退化'的程度，真正的并发保证靠上面的"
-        f"'确实上传了 3 次' + 代码里的线程池，而非计时）")
+    assert fake_uploader.peak_inflight >= 2, (
+        f"峰值并发只有 {fake_uploader.peak_inflight} ⇒ **串行上传**"
+        f"（墙钟 {elapsed:.2f}s仅供参考，不再是判据）")
+    assert fake_uploader.inflight == 0, "结束后不该还有在飞的上传"
     assert service.store.get(tid).status == "in_progress"
+
 
 
 def test_single_image_capabilities_reject_extra_images_instead_of_dropping_them(
