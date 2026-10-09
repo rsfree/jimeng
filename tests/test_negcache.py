@@ -210,6 +210,78 @@ def test_lookup_happens_before_the_task_row_is_created():
 
 
 # ---------------------------------------------------------------------------
+# ③' 纯 prompt 键：文字类拒绝必须拦住"同 prompt、换图 URL"的重放
+#    （2026-10-09 线上实锤，jimeng.1task.cn 三连击）
+# ---------------------------------------------------------------------------
+
+def test_text_violation_key_classifier():
+    """`is_text_violation_key`：正例是线上实测 fail_key；反例是图类与噪音。"""
+    from app.upstream.jimeng.client import is_text_violation_key
+
+    assert is_text_violation_key(
+        "web_text_violates_community_guidelines_toast") is True   # 线上实测
+    # 图类/素材类**不是**文字违规 —— 换图就该重试，绝不能按 prompt 拦
+    assert is_text_violation_key("web_fail2generate_copyright_block") is False
+    assert is_text_violation_key("web_image_violates_community") is False
+    assert is_text_violation_key("") is False
+    assert is_text_violation_key(None) is False
+
+
+def test_text_violation_blocks_replay_with_fresh_image_url():
+    """🔴 行为门禁（本次事故的回归）：
+
+    2026-10-09 00:31~00:36（线上 tasks 表）：同一段违规 prompt、同一张垫图，
+    调用方（imyai）每次请求重新上传、URL 每次都变（COS 路径带请求流水号）
+    ⇒ 键里的"输入图 URL"维度永远不命中 ⇒ 连交 3 次、每次都到上游、
+    每次都计费，账号随后被风控。
+
+    修复：`_advance` 对**文字类**拒绝额外记一条 `images=[]` 的纯 prompt 键，
+    受理处补查 ⇒ 重放（新 URL）被拦。图类拒绝**不得**有此行为（下一条）。
+    """
+    neg = NegativeCache(ttl=600, max_entries=8)
+    url_1 = ("https://caller.example/temp/drawing/req-1263741/"
+             "3e773a29e078a7104a2d74b532dce8b9.png")
+    url_2 = ("https://caller.example/temp/drawing/req-1263874/"
+             "3e773a29e078a7104a2d74b532dce8b9.png")   # 同一张图，新 URL
+    # —— 模拟 `_advance` 对文字违规的两次写入（精确键 + 纯 prompt 键）——
+    neg.record_failure(reason="web_text_violates_community_guidelines_toast",
+                       **_kw(images=[url_1]))
+    neg.record_failure(reason="prompt 文字违规（与输入图无关）",
+                       **_kw(images=[]))
+    # —— 模拟受理处 `create` 的**两连查**：先精确键、再纯 prompt 键 ——
+    assert neg.would_block(**_kw(images=[url_2])) is None, (
+        "精确键对'同图新 URL'就该未命中（这正是原 bug 的成因）")
+    assert neg.would_block(**_kw(images=[])), (
+        "第二查（纯 prompt 键）必须拦住同 prompt 重放")
+
+
+def test_image_violation_still_allows_retry_with_fresh_image_url():
+    """🔴 防错杀：**图类**拒绝只记精确键 ⇒ 换图 URL（= 换输入）必须放行。
+
+    这与 `test_negcache_never_misfires_on_different_input` 的"换输入图"语义
+    一致 —— 纯 prompt 键**只**属于文字类拒绝，不得蔓延到图类。
+    """
+    neg = NegativeCache(ttl=600, max_entries=8)
+    url_1 = "https://caller.example/req-1/pic.png"
+    url_2 = "https://caller.example/req-2/pic.png"
+    neg.record_failure(reason="web_fail2generate_copyright_block",
+                       **_kw(images=[url_1]))       # 图类：只有精确键
+    assert neg.would_block(**_kw(images=[url_2])) is None, (
+        "图类拒绝换图重试不能被纯 prompt 键误杀")
+
+
+def test_prompt_only_lookup_is_wired_into_create_and_advance():
+    """接线门禁：受理处**两连查**（精确键 + 纯 prompt 键）、
+    `_advance` 按 `is_text_violation_key` 分流。"""
+    src_create = inspect.getsource(Service.create)
+    assert src_create.count("raise_if_blocked") >= 2, (
+        "受理处必须补查纯 prompt 键（第二查 images=[]）")
+    src_advance = inspect.getsource(Service._advance)
+    assert "is_text_violation_key" in src_advance, (
+        "_advance 必须区分文字类拒绝并额外记纯 prompt 键")
+
+
+# ---------------------------------------------------------------------------
 # ④ 预审参数：锁死"严格"那一个（静默放行的典型）
 # ---------------------------------------------------------------------------
 

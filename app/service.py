@@ -74,7 +74,7 @@ from .upstream.jimeng import (
     resolve_video_commerce,
 )
 from .upstream.jimeng.capabilities import ModelConfigCache
-from .upstream.jimeng.client import CODES_SECURITY, is_security_key
+from .upstream.jimeng.client import CODES_SECURITY, is_security_key, is_text_violation_key
 
 log = logging.getLogger(__name__)
 
@@ -512,6 +512,10 @@ class Service:
             "tasks": {"active": self.store.count_active(),
                       "total": self.store.count()},
             "gate": self.gate.stats(),
+            #: 🔴 2026-10-09（负缓存"看起来没生效"排查）：把计数暴露进 `/stats`。
+            #: `records` 涨 = 审核拒绝真的写进来了；`hits` 涨 = 受理时真的拦住了。
+            #: 这两个数之前**没有任何对外出口** ⇒ "有没有生效"只能靠猜。
+            "neg": self.neg.stats(),
             "model_config": self.cfg.stats() if self.cfg else None,
             "observability": OBS.status(),
         }
@@ -981,6 +985,20 @@ class Service:
             images=image,
             resolution_tier=tier,
         )
+        # 🔴 2026-10-09（线上实锤）：上面查的是**精确键**（输入图 URL 进键），
+        # 而调用方每次重传同一张垫图、URL 每次都变（imyai 的 COS 每请求一个
+        # 新路径）⇒ 文字类重放拦不住 —— 10-09 凌晨同 prompt 同图（不同 URL）
+        # 连交 3 次，每次都到上游、每次都计费。文字违规被拒的是 prompt、
+        # 与图无关 ⇒ 补查**纯 prompt 键**（`images=[]`）。该键**只在**
+        # `_advance` 判定"文字违规"时才写入 ⇒ 图类拒绝（版权/素材）不受影响，
+        # "换图重试"照常放行（不错杀）。对 t2i（无图）这是同键重复查询，无害。
+        self.neg.raise_if_blocked(
+            cap_id=cap.key or cap.api_id,
+            upstream_model=upstream_model,
+            prompt=prompt,
+            images=[],
+            resolution_tier=tier,
+        )
 
         now = int(time.time())
         rec = TaskRecord(
@@ -1438,15 +1456,31 @@ class Service:
             # 上游故障/限流是**可重试**的，缓存它们会把"临时故障"
             # 变成 24 小时的假禁固，那是比不缓存坏得多的错）。
             if isinstance(err, ContentPolicyError):
+                fk_now = (getattr(st, "fail_key", "") or "").strip()
                 self.neg.record_failure(
                     cap_id=rec.cap_key or rec.model,
                     upstream_model=rec.upstream_model,
                     prompt=rec.prompt,
                     images=rec.image_refs,
                     resolution_tier=rec.resolution_tier,
-                    reason=(getattr(st, "fail_key", "") or
+                    reason=(fk_now or
                             getattr(st, "failed_reason", "") or "内容审核未通过"),
                 )
+                if is_text_violation_key(fk_now):
+                    # 🔴 2026-10-09（线上实锤）：负缓存键含"输入图 URL 原文"，
+                    # 而调用方每次请求把同一张垫图重新上传、URL 每次都变
+                    # ⇒ 精确键拦不住重放。文字违规被拒的是 prompt 本身、
+                    # 与图无关 ⇒ 额外记一条**纯 prompt 键**（`images=[]`），
+                    # 受理处补查它。图类拒绝（`copyright_block` / 素材预审）
+                    # **不**走这里：换图就该重试，不能错杀（门禁钉住）。
+                    self.neg.record_failure(
+                        cap_id=rec.cap_key or rec.model,
+                        upstream_model=rec.upstream_model,
+                        prompt=rec.prompt,
+                        images=[],
+                        resolution_tier=rec.resolution_tier,
+                        reason=f"prompt 文字违规（与输入图无关）：{fk_now}",
+                    )
             self._fail(rec, err)
             return
 

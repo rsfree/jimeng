@@ -202,6 +202,19 @@ def is_security_key(fail_key: str | None) -> bool:
     """失败键（字符串）是否属于**内容审核/版权**类。"""
     k = (fail_key or "").lower()
     return any(s in k for s in KEYS_SECURITY_SUBSTR)
+
+
+#: 🔴 2026-10-09（线上实锤，jimeng.1task.cn 三连击）：**输入文字违规**的判据子串。
+#: 调用方每次请求把同一张垫图重新上传、URL 每次都变 ⇒ 负缓存键里的
+#: "输入图 URL"维度永远不命中。图类拒绝"换图重试"是正确语义、不能动；
+#: 但**文字违规被拒的是 prompt 本身，与图无关** ⇒ 见 `service._advance`
+#: 对文字类拒绝额外记"纯 prompt 键"（`images=[]`）。
+KEY_TEXT_VIOLATION = "text_violates_community"
+
+
+def is_text_violation_key(fail_key: str | None) -> bool:
+    """失败键是否属于**输入文字违规**（可安全地按"纯 prompt"拦重放）。"""
+    return KEY_TEXT_VIOLATION in (fail_key or "").lower()
 CODES_PARAM = frozenset({1001, 1002, 1161, 1162, 1190, 1189, 3021, 4003,
                          4010, 2203, 2204})
 
