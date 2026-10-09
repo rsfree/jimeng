@@ -8,7 +8,7 @@
   · 风控命中（`1018/1019/1021/2035`）-> 429 risk_control_error（**不可重试**）
   · 频率/并发限流（`1010/1057/2020`）-> 429 rate_limit_error（可退避重试）
   · 积分/日额度耗尽（`1006/4001/121101`）-> 429 quota_exhausted（**重试无效**）
-  · 内容审核/版权（`1063/1159/2003…`）-> 400 content_policy_violation
+  · 内容审核/版权（`1063/1159/2003…`）-> 451 content_policy_violation
   · 上游 5xx / 非 JSON / WAF 页       -> 502 upstream_error
   · 上游超时                          -> 504 upstream_timeout_error
 
@@ -72,9 +72,14 @@ class InvalidParameterError(AdapterError):
 
 
 class ContentPolicyError(AdapterError):
-    """内容审核 / 版权拦截 —— 换个提示词才有用，重试原样请求无意义。"""
+    """内容审核 / 版权拦截 —— 换个提示词才有用，重试原样请求无意义。
 
-    status_code = 400
+    🔴 HTTP **451**（Unavailable For Legal Reasons，2026-10-09 用户口径）：
+    "内容因合规原因不可用"正是这个码的语义 —— 与 400（请求本身写错）
+    区分开，调用方能凭状态码直接分辨"参数错了"和"内容不让生成"。
+    """
+
+    status_code = 451
     err_type = "content_policy_violation"
     err_code = "content_policy_violation"
 

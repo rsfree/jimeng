@@ -465,7 +465,7 @@ h2{{color:#7cb0ff}}a{{color:#7cb0ff}}td,th{{border-color:#1e2836}}}}</style></he
 <div class="card"><h2>怎么调</h2>
 <pre>curl -sS &lt;本机地址&gt;/v1/images/generations \
   -H "Authorization: Bearer $JIMENG_API_KEY" -H 'Content-Type: application/json' \
-  -d '{{"model":"jimeng:t2i","prompt":"一只橘猫在窗台上"}}'</pre>
+  -d '{{"model":"jimeng-t2i","prompt":"一只橘猫在窗台上"}}'</pre>
 <ul><li>异步任务：<code>POST /async/v1/images/generations</code> → <code>GET /async/v1/images/generations/{{task_id}}</code></li>
 <li>字节风格兼容面：<code>/api/v3/contents/generations/tasks</code></li></ul></div>
 <div class="card"><h2>探路（均免鉴权）</h2>

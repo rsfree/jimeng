@@ -136,6 +136,24 @@ class Settings:
     #: 有界 LRU 条数（无界缓存 = 内存泄漏）。
     neg_cache_max: int = 2048
 
+    # ------------------------------------------------ prompt 决策预审（Jev）
+    #: 🔴 2026-10-09：prompt **前置**内容审查闸（Jev 决策模型，见
+    #: `prompt_guard.py`）。即梦没有文字预审接口，prompt 违规只能在提交后
+    #: 被拒且照样计费 ⇒ 用决策模型在受理时就地拦。判定结果**缓存**
+    #: （同 prompt 不重复调决策服务）；**远端失败默认放行**（fail-open，
+    #: 与素材预审同一取向）+ degradations 留痕。
+    guard_enabled: bool = True
+    #: 🔴 决策服务地址与 Key。Key 走 env（`JEV_API_KEY`），**绝不硬编码**。
+    jev_base_url: str = "https://jev.bocha.cn/v1"
+    jev_api_key: str = ""
+    jev_model: str = "bocha-jev-v1"
+    jev_timeout_s: float = 8.0
+    #: noul ≥ 阈值 ⇒ 拦。实测校准：违规全本 0.99 / 良性泳装 0.02，
+    #: 0.5 两侧边距都足够宽（泛化问法只有 0.62，题目必须用审核口径版）。
+    guard_block_threshold: float = 0.5
+    guard_cache_ttl: float = 86400.0
+    guard_cache_max: int = 4096
+
     # ------------------------------------------------------------ 持久化
     #: 任务库 DSN。生产用 PostgreSQL；`:memory:` 或文件路径（SQLite）留给测试与联调。
     task_db: str = "postgresql+psycopg://jimeng:jimeng@127.0.0.1:5432/jimeng"
@@ -256,6 +274,14 @@ class Settings:
             sync_max_wait=_f("SYNC_MAX_WAIT", 300.0),
             neg_cache_ttl=_f("NEG_CACHE_TTL", 86400.0),
             neg_cache_max=int(_f("NEG_CACHE_MAX", 2048)),
+            guard_enabled=_b("PROMPT_GUARD_ENABLED", True),
+            jev_base_url=_s("JEV_BASE_URL", "https://jev.bocha.cn/v1"),
+            jev_api_key=_s("JEV_API_KEY"),
+            jev_model=_s("JEV_MODEL", "bocha-jev-v1"),
+            jev_timeout_s=_f("JEV_TIMEOUT", 8.0),
+            guard_block_threshold=_f("GUARD_BLOCK_THRESHOLD", 0.5),
+            guard_cache_ttl=_f("GUARD_CACHE_TTL", 86400.0),
+            guard_cache_max=int(_f("GUARD_CACHE_MAX", 4096)),
             task_db=_s("TASK_DB",
                        "postgresql+psycopg2://jimeng:jimeng@127.0.0.1:5432/jimeng"),
             task_retention_days=_i("TASK_RETENTION_DAYS", 7),

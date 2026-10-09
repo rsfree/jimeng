@@ -589,7 +589,7 @@ Authorization: Bearer <key>
 | `code` | HTTP | 含义与**下一步** |
 |---|---|---|
 | `invalid_parameter` | 400 | 请求写错了。`param` 指出是哪个字段 |
-| `content_policy_violation` | 400 | 上游送审/版权拦截 ⇒ 换 prompt 或换图 |
+| `content_policy_violation` | 451 | 内容审核拦截（上游送审/版权/前置决策预审）⇒ 换 prompt 或换图。451 = Unavailable For Legal Reasons，"内容因合规原因不可用"（2026-10-09 起，原 400） |
 | `invalid_api_key` | 401 | 调用方的 Key 不对 |
 | `task_not_found` | 404 | 不存在或不属于本 Key |
 | `upstream_rate_limited` | 429 | 上游限流，**可退避重试**（带 `Retry-After`） |

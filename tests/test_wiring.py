@@ -334,7 +334,7 @@ def test_error_mapping_covers_every_upstream_error_class():
         (JimengRateLimitError("x"), 429),
         (JimengQuotaError("x"), 429),
         (JimengRiskError("x"), 429),
-        (JimengContentError("x"), 400),
+        (JimengContentError("x"), 451),    # 2026-10-09 用户口径：内容审核 → 451
         (JimengParamError("x"), 400),
         (JimengTimeout("x"), 504),
         (JimengError("x"), 502),

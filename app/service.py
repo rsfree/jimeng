@@ -34,6 +34,7 @@ from . import models
 from .ark import resolve_ark_model
 from .config import Settings
 from .negcache import NegativeCache
+from .prompt_guard import PromptGuard
 from .errors import (
     AdapterError,
     CapabilityNotWiredError,
@@ -333,6 +334,10 @@ class Service:
         #: 审核拒绝是**确定性**的且**照样计费**⇒ 原样重试= 反复扣钱。
         self.neg = NegativeCache(ttl=settings.neg_cache_ttl,
                                  max_entries=settings.neg_cache_max)
+        #: 🔴 2026-10-09：prompt 前置决策预审（Jev 决策模型，`prompt_guard.py`）。
+        #: prompt 没有上游预审接口，违规只能提交后被拒且照样计费 ⇒
+        #: 受理时就地判一次；结果缓存；**远端失败默认放行**（fail-open）。
+        self.guard = PromptGuard.from_settings(settings)
         self.client = client
         self.uploader = uploader
         self.cfg = cfg
@@ -517,6 +522,8 @@ class Service:
             #: `records` 涨 = 审核拒绝真的写进来了；`hits` 涨 = 受理时真的拦住了。
             #: 这两个数之前**没有任何对外出口** ⇒ "有没有生效"只能靠猜。
             "neg": self.neg.stats(),
+            #: prompt 前置决策预审（Jev）：blocks/errors/cache_hits 一眼看闸门状态。
+            "prompt_guard": self.guard.stats(),
             "model_config": self.cfg.stats() if self.cfg else None,
             "observability": OBS.status(),
         }
@@ -1000,6 +1007,14 @@ class Service:
             images=[],
             resolution_tier=tier,
         )
+
+        # 🔴 2026-10-09（用户口径三条）：**prompt 前置决策预审**——
+        # ① 决策模型判定"是否放行提示词进入下一步"：违规 ⇒ 本地拦
+        #   （不落库、不提交、不花钱）；② 判定结果**缓存**（同 prompt 不重调）；
+        # ③ **远端失败默认进入下一步**（fail-open）⇒ 只追加 degradations 留痕。
+        guard_note = self.guard.check(prompt)
+        if guard_note:
+            degradations.append(guard_note)
 
         now = int(time.time())
         rec = TaskRecord(
