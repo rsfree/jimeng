@@ -74,7 +74,8 @@ from .upstream.jimeng import (
     resolve_video_commerce,
 )
 from .upstream.jimeng.capabilities import ModelConfigCache
-from .upstream.jimeng.client import CODES_SECURITY, is_security_key, is_text_violation_key
+from .upstream.jimeng.client import (CODES_SECURITY, is_security_key,
+                                     is_text_policy_failure)
 
 log = logging.getLogger(__name__)
 
@@ -1466,13 +1467,17 @@ class Service:
                     reason=(fk_now or
                             getattr(st, "failed_reason", "") or "内容审核未通过"),
                 )
-                if is_text_violation_key(fk_now):
+                if is_text_policy_failure(
+                        getattr(st, "fail_code", None), fk_now):
                     # 🔴 2026-10-09（线上实锤）：负缓存键含"输入图 URL 原文"，
                     # 而调用方每次请求把同一张垫图重新上传、URL 每次都变
                     # ⇒ 精确键拦不住重放。文字违规被拒的是 prompt 本身、
-                    # 与图无关 ⇒ 额外记一条**纯 prompt 键**（`images=[]`），
-                    # 受理处补查它。图类拒绝（`copyright_block` / 素材预审）
-                    # **不**走这里：换图就该重试，不能错杀（门禁钉住）。
+                    # 与图无关（图有提交前的素材预审实时拦；prompt 没有
+                    # 预审接口，负缓存是唯一省钱闸）⇒ 额外记一条
+                    # **纯 prompt 键**（`images=[]`），受理处补查。
+                    # 字符串（fail_key）与数值（2038 InputTextRisk）两形态都算；
+                    # 图类拒绝（`copyright_block` / 素材预审）**不**走这里：
+                    # 换图就该重试，不能错杀（门禁钉住）。
                     self.neg.record_failure(
                         cap_id=rec.cap_key or rec.model,
                         upstream_model=rec.upstream_model,

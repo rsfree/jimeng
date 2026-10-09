@@ -270,14 +270,33 @@ def test_image_violation_still_allows_retry_with_fresh_image_url():
         "图类拒绝换图重试不能被纯 prompt 键误杀")
 
 
+def test_text_policy_failure_classifier():
+    """`is_text_policy_failure`：字符串与数值两形态都要认出**输入文字**类。"""
+    from app.upstream.jimeng.client import is_text_policy_failure
+
+    # 字符串形态（线上实测 fail_key）
+    assert is_text_policy_failure(
+        None, "web_text_violates_community_guidelines_toast") is True
+    # 数值形态（抓包实测 2038 = InputTextRisk，fail_key 可能为空）
+    assert is_text_policy_failure(2038, "") is True
+    assert is_text_policy_failure(2038, None) is True
+    # 图类/素材类**不是**文字违规 —— 换图就该重试，绝不能按 prompt 拦
+    assert is_text_policy_failure(
+        None, "web_fail2generate_copyright_block") is False
+    assert is_text_policy_failure(None, "web_image_violates_community") is False
+    assert is_text_policy_failure(2039, "") is False      # InputImageRisk 类
+    assert is_text_policy_failure(None, "") is False
+    assert is_text_policy_failure(None, None) is False
+
+
 def test_prompt_only_lookup_is_wired_into_create_and_advance():
     """接线门禁：受理处**两连查**（精确键 + 纯 prompt 键）、
-    `_advance` 按 `is_text_violation_key` 分流。"""
+    `_advance` 按 `is_text_policy_failure` 分流（字符串/数值两形态）。"""
     src_create = inspect.getsource(Service.create)
     assert src_create.count("raise_if_blocked") >= 2, (
         "受理处必须补查纯 prompt 键（第二查 images=[]）")
     src_advance = inspect.getsource(Service._advance)
-    assert "is_text_violation_key" in src_advance, (
+    assert "is_text_policy_failure" in src_advance, (
         "_advance 必须区分文字类拒绝并额外记纯 prompt 键")
 
 

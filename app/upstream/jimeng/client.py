@@ -215,6 +215,27 @@ KEY_TEXT_VIOLATION = "text_violates_community"
 def is_text_violation_key(fail_key: str | None) -> bool:
     """失败键是否属于**输入文字违规**（可安全地按"纯 prompt"拦重放）。"""
     return KEY_TEXT_VIOLATION in (fail_key or "").lower()
+
+
+#: 🔴 **数值形态**的文字风险码（抓包实测：`2038 = InputTextRisk`，
+#: `fail_starling_message` = "你输入的文字不符合平台规则"——与字符串形态的
+#: `web_text_violates_community_guidelines_toast` 同一族）。上游有时给
+#: 字符串 fail_key、有时给数值 fail_code，**两形态都要覆盖**。
+CODE_TEXT_RISK = frozenset({2038})
+
+
+def is_text_policy_failure(fail_code: int | None, fail_key: str | None) -> bool:
+    """这次内容审核拒绝是否属于**输入文字**（与输入图无关）。
+
+    命中 ⇒ 负缓存额外记"纯 prompt 键"（见 `service._advance`）——
+    prompt 没有预审接口，文字违规只能在提交后被拒（且计费），
+    负缓存是唯一省钱闸，必须把两种形态都拦住。
+    图类（`copyright_block` / 素材预审 / 2039 类 InputImageRisk）**不**算：
+    图有提交前的素材预审实时拦（`execute_generate_audit`，拒绝不提交不花钱），
+    且"换图就该重试"，按 prompt 拦会错杀。
+    """
+    return is_text_violation_key(fail_key) or fail_code in CODE_TEXT_RISK
+
 CODES_PARAM = frozenset({1001, 1002, 1161, 1162, 1190, 1189, 3021, 4003,
                          4010, 2203, 2204})
 
